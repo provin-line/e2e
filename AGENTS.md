@@ -22,7 +22,9 @@ Black-box end-to-end tests for provin OSS. This repo orchestrates real binaries
    in-process.
 3. **Both runtimes stay equivalent.** A scenario's process-mode topology and
    its `docker-compose.yml` must describe the same node/config layout. A change
-   to one updates the other.
+   to one updates the other. While the compose runtime itself is pending,
+   authoring a scenario's compose twin may be deferred — but every deferral is
+   recorded in the scope findings log, never silent.
 4. **Findings over workarounds.** When a scenario needs something the product
    doesn't provide (missing surface, config gap, manual step), prefer recording
    it as a finding and doing the minimal harness workaround, over silently

@@ -158,9 +158,20 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 		t.Fatalf("eavesdropper connect: %v", err)
 	}
 	defer eveConn.Close()
-	eveGot := make(chan []byte, 4)
+	eveGot := make(chan []byte, 8)
 	if err := eveConn.Subscriber(lotPipelineDID).Subscribe(func(b []byte) { eveGot <- b }); err != nil {
 		t.Fatalf("eavesdropper subscribe: %v", err)
+	}
+	// Positive control: eve's subscription must be able to deliver at all
+	// (a self-publish within her own account), so the later empty-channel
+	// negative proves isolation, not a dead subscription.
+	if err := eveConn.Publisher(lotPipelineDID).Publish([]byte(`{"control":true}`)); err != nil {
+		t.Fatalf("eavesdropper control publish: %v", err)
+	}
+	select {
+	case <-eveGot:
+	case <-time.After(10 * time.Second):
+		t.Fatal("eavesdropper subscription did not deliver its own control message — negative check would be vacuous")
 	}
 
 	// The manufacturer's plant system reports one lot's emission record.
@@ -232,14 +243,13 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 		return lc != nil && lc.GetConfidence() == auditpb.Confidence_CONFIDENCE_VERIFIED
 	})
 
-	// Org isolation: the ungranted account observed nothing throughout.
+	// Org isolation: beyond her own control message, the ungranted account
+	// observed nothing throughout the scenario's forced round-trips.
 	select {
 	case b := <-eveGot:
 		t.Fatalf("eavesdropper received %d bytes on %s without a grant", len(b), lotPipelineDID)
 	default:
 	}
-
-	_ = mfgNode // (referenced for symmetry; stdout not asserted on the producer side)
 }
 
 // fetchCredential resolves a credential by content address from a node's

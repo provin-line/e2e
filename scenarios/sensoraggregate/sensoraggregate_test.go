@@ -58,6 +58,12 @@ var (
 	aggProcess      = aggPipeline + ":process:agg"
 )
 
+// manifest is ManifestFold's output payload shape.
+type manifest struct {
+	Sources []string `json:"sources"`
+	Count   int      `json:"count"`
+}
+
 func sourceBlock(name, ingress, pipeline, process, pipelineID, processID string) string {
 	return fmt.Sprintf(`
       %s {
@@ -151,58 +157,12 @@ func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 		[]string{sensorAProcess, sensorBProcess, aggProcess},
 	)
 
-	// Two autonomous sensor feeds report one reading each.
 	conn, err := natstransport.Connect(natstransport.Config{URL: broker.URL, AccountSeed: plant.Seed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}
 	defer conn.Close()
-	if err := conn.Publisher("ingest.sensor-a").Publish([]byte(`{"sensor":"a","temp_c":21.5}`)); err != nil {
-		t.Fatalf("publish sensor-a: %v", err)
-	}
-	if err := conn.Publisher("ingest.sensor-b").Publish([]byte(`{"sensor":"b","temp_c":22.1}`)); err != nil {
-		t.Fatalf("publish sensor-b: %v", err)
-	}
 
-	// The window fires and the sink consumes ONE aggregate credential whose
-	// manifest names exactly two source credentials.
-	var head string
-	var manifest struct {
-		Sources []string `json:"sources"`
-		Count   int      `json:"count"`
-	}
-	harness.WaitFor(t, "aggregate sink record with 2-source manifest", 60*time.Second, func() bool {
-		for _, line := range node.SinkLines() {
-			var rec struct {
-				Credential string          `json:"credential"`
-				Confidence string          `json:"confidence"`
-				Payload    json.RawMessage `json:"payload"`
-			}
-			if json.Unmarshal([]byte(line), &rec) != nil || rec.Credential == "" {
-				continue
-			}
-			var m struct {
-				Sources []string `json:"sources"`
-				Count   int      `json:"count"`
-			}
-			if json.Unmarshal(rec.Payload, &m) != nil || m.Count == 0 {
-				continue // not the aggregate manifest record
-			}
-			if !strings.EqualFold(rec.Confidence, "verified") {
-				t.Fatalf("aggregate sink record not verified: %s", line)
-			}
-			if m.Count != 2 || len(m.Sources) != 2 {
-				// A window may fire with one pooled input if the second sensor
-				// lands late; keep waiting for the 2-source fold.
-				continue
-			}
-			head, manifest = rec.Credential, m
-			return true
-		}
-		return false
-	})
-
-	// Fetch the aggregate credential and both consumed sources over the wire.
 	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, node.BaseURL)
 	fetch := func(hash string) *vc.PipelinePassCredential {
 		resolved, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: hash})))
@@ -215,19 +175,75 @@ func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 		}
 		return &cred
 	}
+
+	// Two autonomous sensor feeds report one reading each. The aggregate
+	// window ticker has been firing since boot with uncontrollable phase, so
+	// a tick can legitimately land BETWEEN the two admits and split the pair
+	// into two 1-source aggregates. The stimulus therefore retries: a fresh
+	// reading pair every ~2.5s until some window folds both sensors together.
+	// The accept predicate requires both sensor issuers (not just count==2 —
+	// under republish a window could pool two readings from one sensor).
+	publishPair := func(attempt int) {
+		a := fmt.Sprintf(`{"sensor":"a","temp_c":21.5,"attempt":%d}`, attempt)
+		b := fmt.Sprintf(`{"sensor":"b","temp_c":22.1,"attempt":%d}`, attempt)
+		if err := conn.Publisher("ingest.sensor-a").Publish([]byte(a)); err != nil {
+			t.Fatalf("publish sensor-a: %v", err)
+		}
+		if err := conn.Publisher("ingest.sensor-b").Publish([]byte(b)); err != nil {
+			t.Fatalf("publish sensor-b: %v", err)
+		}
+	}
+	publishPair(0)
+
+	var head string
+	var sources []*vc.PipelinePassCredential
+	seen := map[string]bool{} // aggregate records already inspected
+	attempt := 0
+	deadline := time.Now().Add(90 * time.Second)
+	for head == "" {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for a both-sensor aggregate manifest (%d stimulus attempts)", attempt+1)
+		}
+		for _, line := range node.SinkLines() {
+			var rec struct {
+				Credential string          `json:"credential"`
+				Confidence string          `json:"confidence"`
+				Payload    json.RawMessage `json:"payload"`
+			}
+			if json.Unmarshal([]byte(line), &rec) != nil || rec.Credential == "" || seen[rec.Credential] {
+				continue
+			}
+			var m manifest
+			if json.Unmarshal(rec.Payload, &m) != nil || m.Count == 0 {
+				continue // not an aggregate manifest record
+			}
+			seen[rec.Credential] = true
+			if !strings.EqualFold(rec.Confidence, "verified") {
+				t.Fatalf("aggregate sink record not verified: %s", line)
+			}
+			if m.Count != 2 || len(m.Sources) != 2 {
+				continue // split window — legitimate; keep stimulating
+			}
+			cands := []*vc.PipelinePassCredential{fetch(m.Sources[0]), fetch(m.Sources[1])}
+			issuers := map[string]bool{cands[0].Issuer(): true, cands[1].Issuer(): true}
+			if !issuers[sensorAProcess] || !issuers[sensorBProcess] {
+				continue // two readings from one sensor pooled together — keep going
+			}
+			head, sources = rec.Credential, cands
+			break
+		}
+		if head == "" {
+			time.Sleep(250 * time.Millisecond)
+			attempt++
+			if attempt%10 == 0 { // fresh stimulus every ~2.5s
+				publishPair(attempt / 10)
+			}
+		}
+	}
+
 	aggCred := fetch(head)
 	if aggCred.Issuer() != aggProcess {
 		t.Errorf("aggregate issuer = %s, want %s", aggCred.Issuer(), aggProcess)
-	}
-	sources := make([]*vc.PipelinePassCredential, 0, len(manifest.Sources))
-	issuerSeen := map[string]bool{}
-	for _, h := range manifest.Sources {
-		c := fetch(h)
-		issuerSeen[c.Issuer()] = true
-		sources = append(sources, c)
-	}
-	if !issuerSeen[sensorAProcess] || !issuerSeen[sensorBProcess] {
-		t.Errorf("consumed sources issuers = %v, want both sensors", issuerSeen)
 	}
 
 	// Consume-locus recomputation: the relying-party check over exactly the
