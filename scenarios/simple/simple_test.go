@@ -45,11 +45,9 @@ const (
 	relayProcessDID  = "did:dplaax:poc.dplaax.dev:org:acme:pipeline:relay:process:r1"
 
 	ingressSubject = "ingest.src"
-	listenAddr     = ":18443"
-	pdpAddr        = ":19091"
 )
 
-func loopsBlock() string {
+func loopsBlock(listenAddr string) string {
 	return fmt.Sprintf(`
       src {
         role            = "source"
@@ -99,7 +97,8 @@ func loopsBlock() string {
 func TestSimple_SourceChainedSink(t *testing.T) {
 	ctx := context.Background()
 	bin := harness.BuildStandalone(t)
-	pdpURL := harness.StartPDPStub(t, pdpAddr)
+	listenAddr := harness.FreePort(t)
+	pdpURL := harness.StartPDPStub(t, harness.FreePort(t))
 
 	workDir := t.TempDir()
 	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "acme")
@@ -117,7 +116,7 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 		NodeDID:         ownerDID,
 		ResolverBaseURL: baseURL,
 		VCStoreEndpoint: baseURL,
-		LoopsBlock:      loopsBlock(),
+		LoopsBlock:      loopsBlock(listenAddr),
 		Extra: `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
     audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`,
 	}

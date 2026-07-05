@@ -36,11 +36,9 @@ const (
 	lowProcessDID   = "did:dplaax:poc.dplaax.dev:org:acme:pipeline:low:process:l1"
 
 	ingressSubject = "ingest.readings"
-	listenAddr     = ":18453"
-	pdpAddr        = ":19092"
 )
 
-func chainedBlock(name, outPipeline, processDID, filterExpr, branchMark string) string {
+func chainedBlock(listenAddr, name, outPipeline, processDID, filterExpr, branchMark string) string {
 	return fmt.Sprintf(`
       %s {
         role            = "chained"
@@ -64,7 +62,7 @@ func chainedBlock(name, outPipeline, processDID, filterExpr, branchMark string) 
 		name, strings.ToLower(name)+"1", listenAddr, filterExpr, branchMark)
 }
 
-func sinkBlock(name, ingress string) string {
+func sinkBlock(listenAddr, name, ingress string) string {
 	return fmt.Sprintf(`
       %s {
         role            = "sink"
@@ -77,7 +75,7 @@ func sinkBlock(name, ingress string) string {
       }`, name, ingress, listenAddr)
 }
 
-func loopsBlock() string {
+func loopsBlock(listenAddr string) string {
 	src := fmt.Sprintf(`
       src {
         role            = "source"
@@ -93,10 +91,10 @@ func loopsBlock() string {
         transformation-claim = "convert"
       }`, ingressSubject, srcPipelineDID, srcProcessDID, srcProcessDID+"#signing")
 	return src +
-		chainedBlock("high", highPipelineDID, highProcessDID, "reading >= 10", "high") +
-		chainedBlock("low", lowPipelineDID, lowProcessDID, "reading < 10", "low") +
-		sinkBlock("archive-high", highPipelineDID) +
-		sinkBlock("archive-low", lowPipelineDID)
+		chainedBlock(listenAddr, "high", highPipelineDID, highProcessDID, "reading >= 10", "high") +
+		chainedBlock(listenAddr, "low", lowPipelineDID, lowProcessDID, "reading < 10", "low") +
+		sinkBlock(listenAddr, "archive-high", highPipelineDID) +
+		sinkBlock(listenAddr, "archive-low", lowPipelineDID)
 }
 
 type sinkRecord struct {
@@ -130,7 +128,8 @@ func branchOf(rec sinkRecord) (branch string, reading float64) {
 
 func TestBranching_FanOutAndFilterDrop(t *testing.T) {
 	bin := harness.BuildStandalone(t)
-	pdpURL := harness.StartPDPStub(t, pdpAddr)
+	listenAddr := harness.FreePort(t)
+	pdpURL := harness.StartPDPStub(t, harness.FreePort(t))
 
 	workDir := t.TempDir()
 	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "acme")
@@ -148,7 +147,7 @@ func TestBranching_FanOutAndFilterDrop(t *testing.T) {
 		NodeDID:         ownerDID,
 		ResolverBaseURL: baseURL,
 		VCStoreEndpoint: baseURL,
-		LoopsBlock:      loopsBlock(),
+		LoopsBlock:      loopsBlock(listenAddr),
 		Extra: `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
     audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`,
 	}

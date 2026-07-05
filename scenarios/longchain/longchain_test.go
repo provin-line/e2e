@@ -43,8 +43,6 @@ const (
 
 	hops           = 10
 	ingressSubject = "ingest.deep"
-	listenAddr     = ":18463"
-	pdpAddr        = ":19093"
 )
 
 func hopPipelineDID(i int) string { return fmt.Sprintf("%shop%02d", orgBase, i) }
@@ -52,7 +50,7 @@ func hopProcessDID(i int) string  { return hopPipelineDID(i) + fmt.Sprintf(":pro
 
 // loopsBlock renders src → hop01..hopN → sink. Hop i consumes hop(i-1)'s
 // subject (hop 1 consumes the source pipeline) and stamps {'hop': i}.
-func loopsBlock() (block string, pipelines, processes []string) {
+func loopsBlock(listenAddr string) (block string, pipelines, processes []string) {
 	srcPipeline := orgBase + "deep"
 	srcProcess := srcPipeline + ":process:s1"
 	pipelines = append(pipelines, srcPipeline)
@@ -117,14 +115,15 @@ func loopsBlock() (block string, pipelines, processes []string) {
 func TestLongChain_DeepAuditAndWireTraversal(t *testing.T) {
 	ctx := context.Background()
 	bin := harness.BuildStandalone(t)
-	pdpURL := harness.StartPDPStub(t, pdpAddr)
+	listenAddr := harness.FreePort(t)
+	pdpURL := harness.StartPDPStub(t, harness.FreePort(t))
 
 	workDir := t.TempDir()
 	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "acme")
 	acme := broker.Account(t, "acme")
 
 	baseURL := "http://127.0.0.1" + listenAddr
-	loops, pipelines, processes := loopsBlock()
+	loops, pipelines, processes := loopsBlock(listenAddr)
 	cfg := harness.NodeConfig{
 		ListenAddr:      listenAddr,
 		RegistryID:      registryID,

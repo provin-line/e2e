@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/server"
 	natstest "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nkeys"
@@ -120,7 +121,10 @@ func (n *NATS) Account(t *testing.T, name string) *NATSAccount {
 
 // Grant establishes a cross-account subject grant: AddExport on the exporter,
 // AddImport on the importer, then re-bridges the updated JWTs into the broker's
-// resolver. Call before the importing client connects.
+// resolver AND pushes them into any already-loaded account. The push matters:
+// the broker caches account claims on first lookup and (with non-expiring
+// JWTs) never re-fetches from the resolver, so without UpdateAccountClaims a
+// grant issued after either side connected would silently never take effect.
 func (n *NATS) Grant(t *testing.T, exporter, importer, subject string) {
 	t.Helper()
 	exp := n.Account(t, exporter)
@@ -132,6 +136,27 @@ func (n *NATS) Grant(t *testing.T, exporter, importer, subject string) {
 		t.Fatalf("nats: AddImport(%s, %s): %v", importer, subject, err)
 	}
 	n.bridge(t)
+	n.refreshLoaded(t, exp.Pub)
+	n.refreshLoaded(t, imp.Pub)
+}
+
+// refreshLoaded pushes the resolver-dir JWT for pub into the broker's live
+// account object, if the broker has already loaded that account.
+func (n *NATS) refreshLoaded(t *testing.T, pub string) {
+	t.Helper()
+	acc, err := n.server.LookupAccount(pub)
+	if err != nil || acc == nil {
+		return // not loaded yet — the resolver copy is authoritative at first connect
+	}
+	raw, err := os.ReadFile(filepath.Join(n.ResolverDir, pub+".jwt"))
+	if err != nil {
+		t.Fatalf("nats: read refreshed jwt for %s: %v", pub, err)
+	}
+	claims, err := jwt.DecodeAccountClaims(string(raw))
+	if err != nil {
+		t.Fatalf("nats: decode refreshed jwt for %s: %v", pub, err)
+	}
+	n.server.UpdateAccountClaims(acc, claims)
 }
 
 // bridge loads every <accountPub>.jwt the operators wrote into the broker's

@@ -11,8 +11,15 @@ Black-box end-to-end tests for provin OSS. This repo orchestrates real binaries
    subjects with account credentials, stdout (NDJSON sink), and config files.
    No in-process construction of node components — that's what `repos/oss`'s
    own tests do.
-2. **Assertions may use oss packages** (`vc`, `did`, generated proto clients)
-   to verify what came over the wire cryptographically.
+2. **Assertions and out-of-band setup may use published oss packages** —
+   `vc`/`did`/generated proto clients for cryptographic verification of what
+   came over the wire, plus client-side/provisioning packages for the roles a
+   deployment performs out-of-band: NATS entity provisioning
+   (`network/pkg/services/chainmanager/infra/nats`), DID resolution as a
+   relying party (`network/pkg/didresolver`, `network/pkg/core` guard), and
+   producer stimulus (`pipeline/transport/nats`). What stays forbidden is
+   constructing the node's own internals (data planes, handlers, stores)
+   in-process.
 3. **Both runtimes stay equivalent.** A scenario's process-mode topology and
    its `docker-compose.yml` must describe the same node/config layout. A change
    to one updates the other.

@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -22,12 +23,15 @@ import (
 )
 
 // BuildStandalone compiles cmd/standalone from the cloned oss repo once per
-// test binary and returns the executable path.
+// test binary and returns the executable path. The output path is keyed by the
+// test binary's name: scenario packages run in parallel, and a shared output
+// path would let one package's `go build` clobber the binary another package's
+// node is currently executing.
 func BuildStandalone(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
 		root := repoRoot(t)
-		out := filepath.Join(root, ".tmp", "standalone")
+		out := filepath.Join(root, ".tmp", "standalone-"+filepath.Base(os.Args[0]))
 		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 			buildErr = err
 			return
@@ -82,6 +86,21 @@ type Node struct {
 	cmd    *exec.Cmd
 	stdout *LogBuffer
 	stderr *LogBuffer
+	done   chan struct{} // closed when cmd.Wait returns (output flushed)
+}
+
+// FreePort reserves an ephemeral TCP port on loopback and returns it as a
+// ":<port>" listen address. Scenario packages run in parallel; fixed ports
+// collide across test binaries.
+func FreePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	addr := l.Addr().(*net.TCPAddr)
+	_ = l.Close()
+	return fmt.Sprintf(":%d", addr.Port)
 }
 
 // StartNode writes cfg to <dir>/config/application.conf and starts the
@@ -109,6 +128,8 @@ func StartNode(t *testing.T, name, bin, dir, listenAddr, cfg string) *Node {
 	if err := n.cmd.Start(); err != nil {
 		t.Fatalf("node %s: start: %v", name, err)
 	}
+	n.done = make(chan struct{})
+	go func() { _ = n.cmd.Wait(); close(n.done) }() // cmd.Wait flushes the stdout/stderr copiers
 	t.Cleanup(func() { n.Stop(t) })
 
 	waitHealthy(t, name, n.BaseURL+"/healthz", n)
@@ -121,14 +142,17 @@ func (n *Node) Stop(t *testing.T) {
 	if n.cmd.Process == nil {
 		return
 	}
-	_ = n.cmd.Process.Signal(os.Interrupt)
-	done := make(chan struct{})
-	go func() { _, _ = n.cmd.Process.Wait(); close(done) }()
 	select {
-	case <-done:
+	case <-n.done: // already exited
+		return
+	default:
+	}
+	_ = n.cmd.Process.Signal(os.Interrupt)
+	select {
+	case <-n.done:
 	case <-time.After(10 * time.Second):
 		_ = n.cmd.Process.Kill()
-		<-done
+		<-n.done
 	}
 }
 
@@ -152,13 +176,21 @@ func (n *Node) SinkLines() []string {
 	return out
 }
 
-// waitHealthy polls url until 200 or a 30s deadline; on failure it dumps the
-// node's stderr so a boot error is visible in the test log.
+// waitHealthy polls url until 200 or a 30s deadline, failing fast if the node
+// process exits first; on failure it dumps the node's stderr so a boot error
+// is visible in the test log.
 func waitHealthy(t *testing.T, name, url string, n *Node) {
 	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		select {
+		case <-n.done:
+			t.Fatalf("node %s: exited during boot\n--- stderr ---\n%s\n--- stdout ---\n%s",
+				name, n.Stderr(), n.Stdout())
+		default:
+		}
+		resp, err := client.Get(url)
 		if err == nil {
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
@@ -211,7 +243,12 @@ func StartPDPStub(t *testing.T, addr string) (baseURL string) {
 	mux.HandleFunc("POST /verify", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	srv := &http.Server{Addr: addr, Handler: mux}
-	go func() { _ = srv.ListenAndServe() }()
+	serveErr := &LogBuffer{}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			_, _ = serveErr.Write([]byte(err.Error()))
+		}
+	}()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -228,6 +265,6 @@ func StartPDPStub(t *testing.T, addr string) (baseURL string) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatalf("pdp stub never became healthy on %s", addr)
+	t.Fatalf("pdp stub never became healthy on %s (serve error: %s)", addr, serveErr.String())
 	return ""
 }
