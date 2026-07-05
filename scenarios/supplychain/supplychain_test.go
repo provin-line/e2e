@@ -58,7 +58,7 @@ const (
 	ingressSubject = "ingest.lot-emissions"
 )
 
-func mfgLoops(listenAddr string) string {
+func mfgLoops() string {
 	return fmt.Sprintf(`
       reporter {
         role            = "source"
@@ -88,74 +88,33 @@ func retailerLoops(mfgBaseURL string) string {
       }`, lotPipelineDID, mfgBaseURL)
 }
 
+// scEnv is what the scenario body needs from either runtime.
+type scEnv struct {
+	mfgBase    string // manufacturer control plane, host-reachable
+	retailBase string // retailer control plane, host-reachable
+	natsURL    string
+	mfgSeed    string
+	eveSeed    string
+	retailSink func() []string
+}
+
 func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 	ctx := context.Background()
-	bin := harness.BuildStandalone(t)
-
-	workDir := t.TempDir()
-	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "manufacturer", "retailer", "eavesdropper")
-	mfgAcc := broker.Account(t, "manufacturer")
-	retailAcc := broker.Account(t, "retailer")
-	eveAcc := broker.Account(t, "eavesdropper")
-
-	// The supply-chain handoff is the grant: manufacturer exports the lot
-	// pipeline subject; the retailer imports it. The eavesdropper gets nothing.
-	broker.Grant(t, "manufacturer", "retailer", lotPipelineDID)
-
-	// Manufacturer node: registry + source loop.
-	mfgListen := harness.FreePort(t)
-	mfgBase := "http://127.0.0.1" + mfgListen
-	mfgPDP := harness.StartPDPStub(t, harness.FreePort(t))
-	mfgDir := filepath.Join(workDir, "mfg-node")
-	if err := os.MkdirAll(mfgDir, 0o755); err != nil {
-		t.Fatal(err)
+	var e scEnv
+	if harness.ComposeRuntime() {
+		e = setupCompose(t)
+	} else {
+		e = setupProcess(t)
 	}
-	mfgNode := harness.StartNode(t, "manufacturer", bin, mfgDir, mfgListen, harness.NodeConfig{
-		AllowLoopback:   true,
-		ListenAddr:      mfgListen,
-		RegistryID:      registryID,
-		PDPBaseURL:      mfgPDP,
-		NATSURL:         broker.URL,
-		AccountSeedFile: mfgAcc.SeedFile,
-		TrustSeedFile:   broker.TrustSeedFile,
-		ResolverDir:     broker.ResolverDir,
-		NodeDID:         mfgOwnerDID,
-		ResolverBaseURL: mfgBase,
-		VCStoreEndpoint: mfgBase,
-		LoopsBlock:      mfgLoops(mfgListen),
-	}.Render())
-
-	// Retailer node: sink loop only; all resolution points at the manufacturer.
-	retailListen := harness.FreePort(t)
-	retailPDP := harness.StartPDPStub(t, harness.FreePort(t))
-	retailDir := filepath.Join(workDir, "retail-node")
-	if err := os.MkdirAll(retailDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	retailNode := harness.StartNode(t, "retailer", bin, retailDir, retailListen, harness.NodeConfig{
-		AllowLoopback:   true,
-		ListenAddr:      retailListen,
-		RegistryID:      registryID,
-		PDPBaseURL:      retailPDP,
-		NATSURL:         broker.URL,
-		AccountSeedFile: retailAcc.SeedFile,
-		TrustSeedFile:   broker.TrustSeedFile,
-		ResolverDir:     broker.ResolverDir,
-		NodeDID:         retailerOwnerDID,
-		ResolverBaseURL: mfgBase, // cross-org verification resolves against the producer's registry
-		LoopsBlock:      retailerLoops(mfgBase),
-		Extra: `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
-    audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`,
-	}.Render())
 
 	// Operator bootstrap on the manufacturer's registry.
 	mfgOwner := harness.NewOwner(t, mfgOwnerDID)
-	harness.Bootstrap(t, mfgNode.BaseURL, mfgOwner, []string{lotPipelineDID}, []string{lotProcessDID})
+	harness.Bootstrap(t, e.mfgBase, mfgOwner, []string{lotPipelineDID}, []string{lotProcessDID})
 
 	// The eavesdropper listens on the same subject in its own account: without
 	// an import grant it must receive nothing (org isolation is the product
 	// property this use case sells).
-	eveConn, err := natstransport.Connect(natstransport.Config{URL: broker.URL, AccountSeed: eveAcc.Seed})
+	eveConn, err := natstransport.Connect(natstransport.Config{URL: e.natsURL, AccountSeed: e.eveSeed})
 	if err != nil {
 		t.Fatalf("eavesdropper connect: %v", err)
 	}
@@ -177,7 +136,7 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 	}
 
 	// The manufacturer's plant system reports one lot's emission record.
-	mfgConn, err := natstransport.Connect(natstransport.Config{URL: broker.URL, AccountSeed: mfgAcc.Seed})
+	mfgConn, err := natstransport.Connect(natstransport.Config{URL: e.natsURL, AccountSeed: e.mfgSeed})
 	if err != nil {
 		t.Fatalf("manufacturer connect: %v", err)
 	}
@@ -190,7 +149,7 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 	// The retailer's sink receives, verifies, and emits the record.
 	var head string
 	harness.WaitFor(t, "retailer sink record", 60*time.Second, func() bool {
-		for _, line := range retailNode.SinkLines() {
+		for _, line := range e.retailSink() {
 			var rec struct {
 				Credential string          `json:"credential"`
 				Confidence string          `json:"confidence"`
@@ -219,10 +178,10 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 	// resolving the issuer from the manufacturer's public /did/ route.
 	guard := core.NewURLGuard(core.WithAllowLoopback(true))
 	didres := didresolver.New(guard, didresolver.WithRegistryBaseURL(func(string) (string, error) {
-		return mfgBase, nil
+		return e.mfgBase, nil
 	}))
 	verifier := vc.NewVerifier(didres, ed25519.Verifier{})
-	credBytes := fetchCredential(t, ctx, retailNode.BaseURL, head)
+	credBytes := fetchCredential(t, ctx, e.retailBase, head)
 	var cred vc.PipelinePassCredential
 	if err := json.Unmarshal(credBytes, &cred); err != nil {
 		t.Fatalf("unmarshal credential: %v", err)
@@ -235,7 +194,7 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 	}
 
 	// The retailer's async audit records VERIFIED for the consumed head.
-	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, retailNode.BaseURL)
+	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, e.retailBase)
 	harness.WaitFor(t, "retailer audit VERIFIED", 60*time.Second, func() bool {
 		st, err := auditClient.GetAuditStatus(ctx, harness.Bearer(connect.NewRequest(&auditpb.GetAuditStatusRequest{HeadHash: head})))
 		if err != nil {
@@ -251,6 +210,148 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 	case b := <-eveGot:
 		t.Fatalf("eavesdropper received %d bytes on %s without a grant", len(b), lotPipelineDID)
 	default:
+	}
+}
+
+// setupProcess boots both nodes as subprocesses over the in-harness broker.
+func setupProcess(t *testing.T) scEnv {
+	bin := harness.BuildStandalone(t)
+
+	workDir := t.TempDir()
+	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "manufacturer", "retailer", "eavesdropper")
+	mfgAcc := broker.Account(t, "manufacturer")
+	retailAcc := broker.Account(t, "retailer")
+	eveAcc := broker.Account(t, "eavesdropper")
+
+	// The supply-chain handoff is the grant: manufacturer exports the lot
+	// pipeline subject; the retailer imports it. The eavesdropper gets nothing.
+	broker.Grant(t, "manufacturer", "retailer", lotPipelineDID)
+
+	mfgListen := harness.FreePort(t)
+	mfgBase := "http://127.0.0.1" + mfgListen
+	mfgPDP := harness.StartPDPStub(t, harness.FreePort(t))
+	mfgDir := filepath.Join(workDir, "mfg-node")
+	if err := os.MkdirAll(mfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mfgNode := harness.StartNode(t, "manufacturer", bin, mfgDir, mfgListen, harness.NodeConfig{
+		AllowLoopback:   true,
+		ListenAddr:      mfgListen,
+		RegistryID:      registryID,
+		PDPBaseURL:      mfgPDP,
+		NATSURL:         broker.URL,
+		AccountSeedFile: mfgAcc.SeedFile,
+		TrustSeedFile:   broker.TrustSeedFile,
+		ResolverDir:     broker.ResolverDir,
+		NodeDID:         mfgOwnerDID,
+		ResolverBaseURL: mfgBase,
+		VCStoreEndpoint: mfgBase,
+		LoopsBlock:      mfgLoops(),
+	}.Render())
+
+	retailListen := harness.FreePort(t)
+	retailPDP := harness.StartPDPStub(t, harness.FreePort(t))
+	retailDir := filepath.Join(workDir, "retail-node")
+	if err := os.MkdirAll(retailDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	retailNode := harness.StartNode(t, "retailer", bin, retailDir, retailListen, harness.NodeConfig{
+		AllowLoopback:   true,
+		ListenAddr:      retailListen,
+		RegistryID:      registryID,
+		PDPBaseURL:      retailPDP,
+		NATSURL:         broker.URL,
+		AccountSeedFile: retailAcc.SeedFile,
+		TrustSeedFile:   broker.TrustSeedFile,
+		ResolverDir:     broker.ResolverDir,
+		NodeDID:         retailerOwnerDID,
+		ResolverBaseURL: mfgBase, // cross-org verification resolves against the producer's registry
+		LoopsBlock:      retailerLoops(mfgBase),
+		Extra:           harness.FastTunables,
+	}.Render())
+
+	broker.WaitForSubscriber(t, ingressSubject, 30*time.Second)
+	return scEnv{
+		mfgBase:    mfgNode.BaseURL,
+		retailBase: retailNode.BaseURL,
+		natsURL:    broker.URL,
+		mfgSeed:    mfgAcc.Seed,
+		eveSeed:    eveAcc.Seed,
+		retailSink: retailNode.SinkLines,
+	}
+}
+
+// setupCompose provisions testdata/ (grants BEFORE the broker config is
+// rendered — the compose broker preloads static claims) and boots the two-node
+// docker-compose topology.
+func setupCompose(t *testing.T) scEnv {
+	scenarioDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testdata := filepath.Join(scenarioDir, "testdata")
+	if err := os.RemoveAll(testdata); err != nil {
+		t.Fatal(err)
+	}
+
+	prov := harness.ProvisionCompose(t, testdata, "manufacturer", "retailer", "eavesdropper")
+	prov.Grant(t, "manufacturer", "retailer", lotPipelineDID)
+	prov.WriteBrokerConfig(t)
+
+	const mfgSelf = "http://mfg:8443"
+	prov.WriteNodeConfig(t, "mfg", harness.NodeConfig{
+		AllowPrivateNetworks: true,
+		ListenAddr:           ":8443",
+		RegistryID:           registryID,
+		PDPBaseURL:           "http://pdpstub:9091",
+		NATSURL:              "nats://nats:4222",
+		AccountSeedFile:      "/app/secrets/manufacturer-account.seed",
+		TrustSeedFile:        "/app/secrets/operator.seed",
+		ResolverDir:          "/app/jwts",
+		NodeDID:              mfgOwnerDID,
+		ResolverBaseURL:      mfgSelf,
+		VCStoreEndpoint:      mfgSelf,
+		LoopsBlock:           mfgLoops(),
+	})
+	prov.WriteNodeConfig(t, "retail", harness.NodeConfig{
+		AllowPrivateNetworks: true,
+		ListenAddr:           ":8443",
+		RegistryID:           registryID,
+		PDPBaseURL:           "http://pdpstub:9091",
+		NATSURL:              "nats://nats:4222",
+		AccountSeedFile:      "/app/secrets/retailer-account.seed",
+		TrustSeedFile:        "/app/secrets/operator.seed",
+		ResolverDir:          "/app/jwts",
+		NodeDID:              retailerOwnerDID,
+		ResolverBaseURL:      mfgSelf, // cross-org verification resolves against the producer's registry
+		LoopsBlock:           retailerLoops(mfgSelf),
+		Extra:                harness.FastTunables,
+	})
+
+	c := harness.ComposeUp(t, scenarioDir)
+	natsMon := c.Port(t, "nats", 8222)
+	harness.WaitHTTPHealthy(t, "nats", "http://"+natsMon+"/healthz", 60*time.Second)
+	mfgBase := "http://" + c.Port(t, "mfg", 8443)
+	harness.WaitHTTPHealthy(t, "mfg", mfgBase+"/healthz", 60*time.Second)
+	retailBase := "http://" + c.Port(t, "retail", 8443)
+	harness.WaitHTTPHealthy(t, "retail", retailBase+"/healthz", 60*time.Second)
+
+	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, ingressSubject, 60*time.Second)
+
+	readSeed := func(name string) string {
+		b, err := os.ReadFile(filepath.Join(testdata, name+"-account.seed"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(b))
+	}
+	return scEnv{
+		mfgBase:    mfgBase,
+		retailBase: retailBase,
+		natsURL:    "nats://" + c.Port(t, "nats", 4222),
+		mfgSeed:    readSeed("manufacturer"),
+		eveSeed:    readSeed("eavesdropper"),
+		retailSink: func() []string { return c.SinkLines(t, "retail") },
 	}
 }
 

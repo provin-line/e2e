@@ -15,8 +15,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +48,7 @@ func hopProcessDID(i int) string  { return hopPipelineDID(i) + fmt.Sprintf(":pro
 
 // loopsBlock renders src → hop01..hopN → sink. Hop i consumes hop(i-1)'s
 // subject (hop 1 consumes the source pipeline) and stamps {'hop': i}.
-func loopsBlock(listenAddr string) (block string, pipelines, processes []string) {
+func loopsBlock(selfBase string) (block string, pipelines, processes []string) {
 	srcPipeline := orgBase + "deep"
 	srcProcess := srcPipeline + ":process:s1"
 	pipelines = append(pipelines, srcPipeline)
@@ -92,10 +90,10 @@ func loopsBlock(listenAddr string) (block string, pipelines, processes []string)
           process-id            = "p%02d"
           transformation-claim  = "convert"
           verification-strategy = "adjacent"
-          upstream-endpoint     = "http://127.0.0.1%s"
+          upstream-endpoint     = %q
           converter             = "$merge([$, {'hop': %d}])"
         }
-      }`, i, prevSubject, p, proc, proc+"#signing", i, i, listenAddr, i)
+      }`, i, prevSubject, p, proc, proc+"#signing", i, i, selfBase, i)
 		prevSubject = p
 	}
 
@@ -106,51 +104,33 @@ func loopsBlock(listenAddr string) (block string, pipelines, processes []string)
         sink {
           kind                  = "observation-only"
           verification-strategy = "adjacent"
-          upstream-endpoint     = "http://127.0.0.1%s"
+          upstream-endpoint     = %q
         }
-      }`, prevSubject, listenAddr)
+      }`, prevSubject, selfBase)
 	return b.String(), pipelines, processes
 }
 
 func TestLongChain_DeepAuditAndWireTraversal(t *testing.T) {
 	ctx := context.Background()
-	bin := harness.BuildStandalone(t)
-	listenAddr := harness.FreePort(t)
-	pdpURL := harness.StartPDPStub(t, harness.FreePort(t))
-
-	workDir := t.TempDir()
-	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "acme")
-	acme := broker.Account(t, "acme")
-
-	baseURL := "http://127.0.0.1" + listenAddr
-	loops, pipelines, processes := loopsBlock(listenAddr)
-	cfg := harness.NodeConfig{
-		AllowLoopback:   true,
-		ListenAddr:      listenAddr,
+	var pipelines, processes []string
+	loops := func(selfBase string) string {
+		var block string
+		block, pipelines, processes = loopsBlock(selfBase)
+		return block
+	}
+	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
+		Account:         "acme",
 		RegistryID:      registryID,
-		PDPBaseURL:      pdpURL,
-		NATSURL:         broker.URL,
-		AccountSeedFile: acme.SeedFile,
-		TrustSeedFile:   broker.TrustSeedFile,
-		ResolverDir:     broker.ResolverDir,
 		NodeDID:         ownerDID,
-		ResolverBaseURL: baseURL,
-		VCStoreEndpoint: baseURL,
-		LoopsBlock:      loops,
-		Extra: `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
-    audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`,
-	}
-
-	nodeDir := filepath.Join(workDir, "acme-node")
-	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	node := harness.StartNode(t, "acme", bin, nodeDir, listenAddr, cfg.Render())
+		Loops:           loops,
+		Tunables:        harness.FastTunables,
+		IngressSubjects: []string{ingressSubject},
+	})
 
 	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, node.BaseURL, owner, pipelines, processes)
+	harness.Bootstrap(t, e.NodeBase, owner, pipelines, processes)
 
-	conn, err := natstransport.Connect(natstransport.Config{URL: broker.URL, AccountSeed: acme.Seed})
+	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}
@@ -162,7 +142,7 @@ func TestLongChain_DeepAuditAndWireTraversal(t *testing.T) {
 	// One record after the full relay; converter stamps prove every hop ran in order.
 	var head string
 	harness.WaitFor(t, "sink NDJSON record after 10 hops", 90*time.Second, func() bool {
-		for _, line := range node.SinkLines() {
+		for _, line := range e.SinkLines() {
 			var rec struct {
 				Credential string          `json:"credential"`
 				Confidence string          `json:"confidence"`
@@ -190,10 +170,10 @@ func TestLongChain_DeepAuditAndWireTraversal(t *testing.T) {
 	// Wire chain traversal: head → origin via ResolveVC, verifying each link.
 	guard := core.NewURLGuard(core.WithAllowLoopback(true))
 	didres := didresolver.New(guard, didresolver.WithRegistryBaseURL(func(string) (string, error) {
-		return node.BaseURL, nil
+		return e.NodeBase, nil
 	}))
 	verifier := vc.NewVerifier(didres, ed25519.Verifier{})
-	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, node.BaseURL)
+	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, e.NodeBase)
 
 	var issuers []string
 	hash := head
@@ -227,7 +207,7 @@ func TestLongChain_DeepAuditAndWireTraversal(t *testing.T) {
 	}
 
 	// Deep async audit: the full 11-credential chain records VERIFIED.
-	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, node.BaseURL)
+	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, e.NodeBase)
 	harness.WaitFor(t, "deep-chain audit VERIFIED", 90*time.Second, func() bool {
 		st, err := auditClient.GetAuditStatus(ctx, harness.Bearer(connect.NewRequest(&auditpb.GetAuditStatusRequest{HeadHash: head})))
 		if err != nil {

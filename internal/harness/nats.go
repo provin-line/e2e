@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nats-server/v2/server"
@@ -179,4 +180,24 @@ func (n *NATS) bridge(t *testing.T) {
 			t.Fatalf("nats: resolver store %s: %v", e.Name(), err)
 		}
 	}
+}
+
+// WaitForSubscriber blocks until some client holds a subscription on subject —
+// the gate against publishing an ingress event before the node's data-plane
+// loops have subscribed (a plain-subject publish with no subscriber is lost).
+func (n *NATS) WaitForSubscriber(t *testing.T, subject string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		subsz, err := n.server.Subsz(&server.SubszOptions{Subscriptions: true})
+		if err == nil {
+			for _, sub := range subsz.Subs {
+				if sub.Subject == subject {
+					return
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("nats: no subscriber on %q after %s", subject, timeout)
 }

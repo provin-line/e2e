@@ -18,9 +18,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -102,130 +99,31 @@ func loopsBlock(selfBase string) string {
 		relayPipelineDID, selfBase)
 }
 
-const tunables = `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
-    audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`
-
-// env is what the shared scenario body needs from either runtime.
-type env struct {
-	nodeBase  string // control-plane base URL, host-reachable
-	natsURL   string // broker URL, host-reachable
-	acctSeed  string // acme account seed for the producer connection
-	sinkLines func() []string
-}
-
 func TestSimple_SourceChainedSink(t *testing.T) {
-	if harness.ComposeRuntime() {
-		runScenario(t, setupCompose(t))
-		return
-	}
-	runScenario(t, setupProcess(t))
-}
-
-// setupProcess boots the process runtime: in-harness broker + subprocess node.
-func setupProcess(t *testing.T) env {
-	bin := harness.BuildStandalone(t)
-	listenAddr := harness.FreePort(t)
-	pdpURL := harness.StartPDPStub(t, harness.FreePort(t))
-
-	workDir := t.TempDir()
-	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "acme")
-	acme := broker.Account(t, "acme")
-
-	baseURL := "http://127.0.0.1" + listenAddr
-	cfg := harness.NodeConfig{
-		AllowLoopback:   true,
-		ListenAddr:      listenAddr,
+	runScenario(t, harness.StartSingleNode(t, harness.SingleNodeSpec{
+		Account:         "acme",
 		RegistryID:      registryID,
-		PDPBaseURL:      pdpURL,
-		NATSURL:         broker.URL,
-		AccountSeedFile: acme.SeedFile,
-		TrustSeedFile:   broker.TrustSeedFile,
-		ResolverDir:     broker.ResolverDir,
 		NodeDID:         ownerDID,
-		ResolverBaseURL: baseURL,
-		VCStoreEndpoint: baseURL,
-		LoopsBlock:      loopsBlock(baseURL),
-		Extra:           tunables,
-	}
-
-	nodeDir := filepath.Join(workDir, "acme-node")
-	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	node := harness.StartNode(t, "acme", bin, nodeDir, listenAddr, cfg.Render())
-	return env{
-		nodeBase:  node.BaseURL,
-		natsURL:   broker.URL,
-		acctSeed:  acme.Seed,
-		sinkLines: node.SinkLines,
-	}
-}
-
-// setupCompose provisions testdata/, boots the docker-compose topology, and
-// adapts it to env. Requires the images from `make docker-build`.
-func setupCompose(t *testing.T) env {
-	scenarioDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	testdata := filepath.Join(scenarioDir, "testdata")
-	if err := os.RemoveAll(testdata); err != nil {
-		t.Fatal(err)
-	}
-
-	prov := harness.ProvisionCompose(t, testdata, "acme")
-	prov.WriteBrokerConfig(t)
-
-	const selfBase = "http://acme:8443"
-	prov.WriteNodeConfig(t, "acme", harness.NodeConfig{
-		AllowPrivateNetworks: true,
-		ListenAddr:           ":8443",
-		RegistryID:           registryID,
-		PDPBaseURL:           "http://pdpstub:9091",
-		NATSURL:              "nats://nats:4222",
-		AccountSeedFile:      "/app/secrets/acme-account.seed",
-		TrustSeedFile:        "/app/secrets/operator.seed",
-		ResolverDir:          "/app/jwts",
-		NodeDID:              ownerDID,
-		ResolverBaseURL:      selfBase,
-		VCStoreEndpoint:      selfBase,
-		LoopsBlock:           loopsBlock(selfBase),
-		Extra:                tunables,
-	})
-
-	c := harness.ComposeUp(t, scenarioDir, "e2e-simple-"+strconv.Itoa(os.Getpid()))
-	natsMon := c.Port(t, "nats", 8222)
-	harness.WaitHTTPHealthy(t, "nats", "http://"+natsMon+"/healthz", 60*time.Second)
-	acmeAddr := c.Port(t, "acme", 8443)
-	nodeBase := "http://" + acmeAddr
-	harness.WaitHTTPHealthy(t, "acme", nodeBase+"/healthz", 60*time.Second)
-
-	seed, err := os.ReadFile(filepath.Join(testdata, "acme-account.seed"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return env{
-		nodeBase:  nodeBase,
-		natsURL:   "nats://" + c.Port(t, "nats", 4222),
-		acctSeed:  strings.TrimSpace(string(seed)),
-		sinkLines: func() []string { return c.SinkLines(t, "acme") },
-	}
+		Loops:           loopsBlock,
+		Tunables:        harness.FastTunables,
+		IngressSubjects: []string{ingressSubject},
+	}))
 }
 
 // runScenario is the runtime-independent story: bootstrap, stimulate, assert.
-func runScenario(t *testing.T, e env) {
+func runScenario(t *testing.T, e harness.SingleNodeEnv) {
 	ctx := context.Background()
 
 	// Operator bootstrap over the wire: owner + pipelines + processes. The
 	// registry mints and holds the process signing keys (KMS model).
 	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.nodeBase, owner,
+	harness.Bootstrap(t, e.NodeBase, owner,
 		[]string{srcPipelineDID, relayPipelineDID},
 		[]string{srcProcessDID, relayProcessDID},
 	)
 
 	// Inject one raw JSON reading as an external producer on the account.
-	conn, err := natstransport.Connect(natstransport.Config{URL: e.natsURL, AccountSeed: e.acctSeed})
+	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}
@@ -242,7 +140,7 @@ func runScenario(t *testing.T, e env) {
 	}
 	var sinkRec sinkRecord
 	harness.WaitFor(t, "sink NDJSON record", 60*time.Second, func() bool {
-		for _, line := range e.sinkLines() {
+		for _, line := range e.SinkLines() {
 			var rec sinkRecord
 			if json.Unmarshal([]byte(line), &rec) == nil && rec.Credential != "" {
 				sinkRec = rec
@@ -268,7 +166,7 @@ func runScenario(t *testing.T, e env) {
 
 	// Fetch the sink-consumed credential over the wire and re-verify it with
 	// the product's own verifier against the node's public DID resolution route.
-	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, e.nodeBase)
+	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, e.NodeBase)
 	resolved, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: sinkRec.Credential})))
 	if err != nil {
 		t.Fatalf("ResolveVC(%s): %v", sinkRec.Credential, err)
@@ -282,7 +180,7 @@ func runScenario(t *testing.T, e env) {
 	}
 	guard := core.NewURLGuard(core.WithAllowLoopback(true))
 	didres := didresolver.New(guard, didresolver.WithRegistryBaseURL(func(string) (string, error) {
-		return e.nodeBase, nil
+		return e.NodeBase, nil
 	}))
 	verifier := vc.NewVerifier(didres, ed25519.Verifier{})
 	vres, err := verifier.Verify(ctx, &cred)
@@ -294,7 +192,7 @@ func runScenario(t *testing.T, e env) {
 	}
 
 	// The async audit runner records a linear-chain verdict for the consumed head.
-	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, e.nodeBase)
+	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, e.NodeBase)
 	harness.WaitFor(t, "audit VERIFIED for head "+sinkRec.Credential, 60*time.Second, func() bool {
 		st, err := auditClient.GetAuditStatus(ctx, harness.Bearer(connect.NewRequest(&auditpb.GetAuditStatusRequest{
 			HeadHash: sinkRec.Credential,

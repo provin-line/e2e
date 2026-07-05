@@ -22,8 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -81,8 +79,8 @@ func sourceBlock(name, ingress, pipeline, process, pipelineID, processID string)
       }`, name, ingress, pipeline, process, process+"#signing", pipelineID, processID)
 }
 
-func loopsBlock(listenAddr string) string {
-	base := "http://127.0.0.1" + listenAddr
+func loopsBlock(selfBase string) string {
+	base := selfBase
 	return sourceBlock("sensor-a", "ingest.sensor-a", sensorAPipeline, sensorAProcess, "sensor-a", "sa") +
 		sourceBlock("sensor-b", "ingest.sensor-b", sensorBPipeline, sensorBProcess, "sensor-b", "sb") +
 		fmt.Sprintf(`
@@ -120,51 +118,28 @@ func loopsBlock(listenAddr string) string {
 
 func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 	ctx := context.Background()
-	bin := harness.BuildStandalone(t)
-	listenAddr := harness.FreePort(t)
-	pdpURL := harness.StartPDPStub(t, harness.FreePort(t))
-
-	workDir := t.TempDir()
-	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "plant")
-	plant := broker.Account(t, "plant")
-
-	baseURL := "http://127.0.0.1" + listenAddr
-	cfg := harness.NodeConfig{
-		AllowLoopback:   true,
-		ListenAddr:      listenAddr,
+	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
+		Account:         "plant",
 		RegistryID:      registryID,
-		PDPBaseURL:      pdpURL,
-		NATSURL:         broker.URL,
-		AccountSeedFile: plant.SeedFile,
-		TrustSeedFile:   broker.TrustSeedFile,
-		ResolverDir:     broker.ResolverDir,
 		NodeDID:         ownerDID,
-		ResolverBaseURL: baseURL,
-		VCStoreEndpoint: baseURL,
-		LoopsBlock:      loopsBlock(listenAddr),
-		Extra: `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
-    audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`,
-	}
-
-	nodeDir := filepath.Join(workDir, "plant-node")
-	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	node := harness.StartNode(t, "plant", bin, nodeDir, listenAddr, cfg.Render())
+		Loops:           loopsBlock,
+		Tunables:        harness.FastTunables,
+		IngressSubjects: []string{"ingest.sensor-a", "ingest.sensor-b"},
+	})
 
 	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, node.BaseURL, owner,
+	harness.Bootstrap(t, e.NodeBase, owner,
 		[]string{sensorAPipeline, sensorBPipeline, aggPipeline},
 		[]string{sensorAProcess, sensorBProcess, aggProcess},
 	)
 
-	conn, err := natstransport.Connect(natstransport.Config{URL: broker.URL, AccountSeed: plant.Seed})
+	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}
 	defer conn.Close()
 
-	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, node.BaseURL)
+	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, e.NodeBase)
 	fetch := func(hash string) *vc.PipelinePassCredential {
 		resolved, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: hash})))
 		if err != nil {
@@ -205,7 +180,7 @@ func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for a both-sensor aggregate manifest (%d stimulus attempts)", attempt+1)
 		}
-		for _, line := range node.SinkLines() {
+		for _, line := range e.SinkLines() {
 			var rec struct {
 				Credential string          `json:"credential"`
 				Confidence string          `json:"confidence"`
@@ -251,7 +226,7 @@ func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 	// fetched set. Independent of the emitting node's own audit verdict.
 	guard := core.NewURLGuard(core.WithAllowLoopback(true))
 	didres := didresolver.New(guard, didresolver.WithRegistryBaseURL(func(string) (string, error) {
-		return node.BaseURL, nil
+		return e.NodeBase, nil
 	}))
 	verifier := vc.NewVerifier(didres, ed25519.Verifier{})
 	if r, err := verifier.Verify(ctx, aggCred); err != nil || r.Overall != vc.ConfidenceVerified {
@@ -267,7 +242,7 @@ func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 
 	// Emit-locus self-audit served over the wire: linear chain AND source
 	// commitment verdicts both VERIFIED for the aggregate head.
-	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, node.BaseURL)
+	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, e.NodeBase)
 	harness.WaitFor(t, "audit linear+source_commitment VERIFIED", 60*time.Second, func() bool {
 		st, err := auditClient.GetAuditStatus(ctx, harness.Bearer(connect.NewRequest(&auditpb.GetAuditStatusRequest{HeadHash: head})))
 		if err != nil {

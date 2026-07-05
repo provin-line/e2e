@@ -13,8 +13,6 @@ package branching
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +36,7 @@ const (
 	ingressSubject = "ingest.readings"
 )
 
-func chainedBlock(listenAddr, name, outPipeline, processDID, filterExpr, branchMark string) string {
+func chainedBlock(selfBase, name, outPipeline, processDID, filterExpr, branchMark string) string {
 	return fmt.Sprintf(`
       %s {
         role            = "chained"
@@ -54,15 +52,15 @@ func chainedBlock(listenAddr, name, outPipeline, processDID, filterExpr, branchM
           process-id            = %q
           transformation-claim  = "filter-convert"
           verification-strategy = "adjacent"
-          upstream-endpoint     = "http://127.0.0.1%s"
+          upstream-endpoint     = %q
           filters               = [%q]
           converter             = "$merge([$, {'branch': '%s'}])"
         }
       }`, name, srcPipelineDID, outPipeline, processDID, processDID+"#signing",
-		name, strings.ToLower(name)+"1", listenAddr, filterExpr, branchMark)
+		name, strings.ToLower(name)+"1", selfBase, filterExpr, branchMark)
 }
 
-func sinkBlock(listenAddr, name, ingress string) string {
+func sinkBlock(selfBase, name, ingress string) string {
 	return fmt.Sprintf(`
       %s {
         role            = "sink"
@@ -70,12 +68,12 @@ func sinkBlock(listenAddr, name, ingress string) string {
         sink {
           kind                  = "observation-only"
           verification-strategy = "adjacent"
-          upstream-endpoint     = "http://127.0.0.1%s"
+          upstream-endpoint     = %q
         }
-      }`, name, ingress, listenAddr)
+      }`, name, ingress, selfBase)
 }
 
-func loopsBlock(listenAddr string) string {
+func loopsBlock(selfBase string) string {
 	src := fmt.Sprintf(`
       src {
         role            = "source"
@@ -91,10 +89,10 @@ func loopsBlock(listenAddr string) string {
         transformation-claim = "convert"
       }`, ingressSubject, srcPipelineDID, srcProcessDID, srcProcessDID+"#signing")
 	return src +
-		chainedBlock(listenAddr, "high", highPipelineDID, highProcessDID, "reading >= 10", "high") +
-		chainedBlock(listenAddr, "low", lowPipelineDID, lowProcessDID, "reading < 10", "low") +
-		sinkBlock(listenAddr, "archive-high", highPipelineDID) +
-		sinkBlock(listenAddr, "archive-low", lowPipelineDID)
+		chainedBlock(selfBase, "high", highPipelineDID, highProcessDID, "reading >= 10", "high") +
+		chainedBlock(selfBase, "low", lowPipelineDID, lowProcessDID, "reading < 10", "low") +
+		sinkBlock(selfBase, "archive-high", highPipelineDID) +
+		sinkBlock(selfBase, "archive-low", lowPipelineDID)
 }
 
 type sinkRecord struct {
@@ -104,9 +102,9 @@ type sinkRecord struct {
 }
 
 // sinkRecords parses every NDJSON sink record currently on the node's stdout.
-func sinkRecords(node *harness.Node) []sinkRecord {
+func sinkRecords(e harness.SingleNodeEnv) []sinkRecord {
 	var out []sinkRecord
-	for _, line := range node.SinkLines() {
+	for _, line := range e.SinkLines() {
 		var rec sinkRecord
 		if json.Unmarshal([]byte(line), &rec) == nil && rec.Credential != "" {
 			out = append(out, rec)
@@ -127,45 +125,22 @@ func branchOf(rec sinkRecord) (branch string, reading float64) {
 }
 
 func TestBranching_FanOutAndFilterDrop(t *testing.T) {
-	bin := harness.BuildStandalone(t)
-	listenAddr := harness.FreePort(t)
-	pdpURL := harness.StartPDPStub(t, harness.FreePort(t))
-
-	workDir := t.TempDir()
-	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "acme")
-	acme := broker.Account(t, "acme")
-
-	baseURL := "http://127.0.0.1" + listenAddr
-	cfg := harness.NodeConfig{
-		AllowLoopback:   true,
-		ListenAddr:      listenAddr,
+	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
+		Account:         "acme",
 		RegistryID:      registryID,
-		PDPBaseURL:      pdpURL,
-		NATSURL:         broker.URL,
-		AccountSeedFile: acme.SeedFile,
-		TrustSeedFile:   broker.TrustSeedFile,
-		ResolverDir:     broker.ResolverDir,
 		NodeDID:         ownerDID,
-		ResolverBaseURL: baseURL,
-		VCStoreEndpoint: baseURL,
-		LoopsBlock:      loopsBlock(listenAddr),
-		Extra: `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
-    audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`,
-	}
-
-	nodeDir := filepath.Join(workDir, "acme-node")
-	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	node := harness.StartNode(t, "acme", bin, nodeDir, listenAddr, cfg.Render())
+		Loops:           loopsBlock,
+		Tunables:        harness.FastTunables,
+		IngressSubjects: []string{ingressSubject},
+	})
 
 	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, node.BaseURL, owner,
+	harness.Bootstrap(t, e.NodeBase, owner,
 		[]string{srcPipelineDID, highPipelineDID, lowPipelineDID},
 		[]string{srcProcessDID, highProcessDID, lowProcessDID},
 	)
 
-	conn, err := natstransport.Connect(natstransport.Config{URL: broker.URL, AccountSeed: acme.Seed})
+	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}
@@ -183,7 +158,7 @@ func TestBranching_FanOutAndFilterDrop(t *testing.T) {
 	// Both branch sinks must emit their one verified record.
 	harness.WaitFor(t, "one record on each branch sink", 60*time.Second, func() bool {
 		var high, low bool
-		for _, rec := range sinkRecords(node) {
+		for _, rec := range sinkRecords(e) {
 			switch b, _ := branchOf(rec); b {
 			case "high":
 				high = true
@@ -197,7 +172,7 @@ func TestBranching_FanOutAndFilterDrop(t *testing.T) {
 	// Fan-out settled: give the pipeline a moment to surface any misrouted
 	// records, then assert the exact delivery matrix.
 	time.Sleep(3 * time.Second)
-	recs := sinkRecords(node)
+	recs := sinkRecords(e)
 	var highReadings, lowReadings []float64
 	for _, rec := range recs {
 		if !strings.EqualFold(rec.Confidence, "verified") {

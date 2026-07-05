@@ -1,7 +1,10 @@
 package harness
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -28,6 +31,10 @@ func ComposeRuntime() bool { return os.Getenv("E2E_RUNTIME") == "compose" }
 type ComposeProvision struct {
 	Dir      string // testdata root (mounted into containers)
 	accounts map[string]*NATSAccount
+	// brokerConfigWritten latches WriteBrokerConfig: the compose broker
+	// preloads static claims, so a Grant after the render silently never
+	// takes effect — fail loud instead.
+	brokerConfigWritten bool
 }
 
 // ProvisionCompose writes the NATS provisioning artifacts under dir:
@@ -112,6 +119,9 @@ func (p *ComposeProvision) Account(t *testing.T, name string) *NATSAccount {
 // Grant adds a cross-account export/import pair. Call before WriteBrokerConfig.
 func (p *ComposeProvision) Grant(t *testing.T, exporter, importer, subject string) {
 	t.Helper()
+	if p.brokerConfigWritten {
+		t.Fatalf("compose: Grant(%s->%s) after WriteBrokerConfig — the broker preloads static claims; grant all subjects BEFORE rendering the broker config", exporter, importer)
+	}
 	exp := p.Account(t, exporter)
 	imp := p.Account(t, importer)
 	if _, err := exp.Op.AddExport(subject); err != nil {
@@ -126,6 +136,7 @@ func (p *ComposeProvision) Grant(t *testing.T, exporter, importer, subject strin
 // preloaded (memory resolver: static claims, grants fixed at boot).
 func (p *ComposeProvision) WriteBrokerConfig(t *testing.T) {
 	t.Helper()
+	p.brokerConfigWritten = true
 	var b strings.Builder
 	b.WriteString("port: 4222\nhttp: 8222\n")
 	b.WriteString("operator: /etc/nats/operator.jwt\n")
@@ -163,19 +174,27 @@ type Compose struct {
 	dir     string // working directory for compose commands
 }
 
-// ComposeUp starts the scenario's compose file under a unique project name and
-// registers teardown (down -v). It does not wait for services — call
-// WaitTCPService / poll endpoints as the scenario requires.
-func ComposeUp(t *testing.T, scenarioDir, project string) *Compose {
+// ComposeUp starts the scenario's compose file and registers teardown
+// (down -v). The project name is derived from the scenario directory:
+// DETERMINISTIC per checkout+scenario — a stack leaked by a hard-killed run
+// (no Cleanup) is reclaimed by the pre-up down of the next run — while the
+// path-hash suffix keeps two checkouts sharing one Docker daemon from tearing
+// each other's stacks down. Concurrent same-scenario runs on one checkout are
+// unsupported either way (they'd clobber the shared testdata/).
+func ComposeUp(t *testing.T, scenarioDir string) *Compose {
 	t.Helper()
+	sum := sha256.Sum256([]byte(scenarioDir))
+	project := "e2e-" + filepath.Base(scenarioDir) + "-" + hex.EncodeToString(sum[:4])
 	c := &Compose{Project: project, File: filepath.Join(scenarioDir, "docker-compose.yml"), dir: scenarioDir}
-	t.Cleanup(func() {
+	down := func(logf func(format string, args ...any)) {
 		cmd := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "down", "-v", "--remove-orphans")
 		cmd.Dir = c.dir
 		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Logf("compose down: %v\n%s", err, out)
+			logf("compose down: %v\n%s", err, out)
 		}
-	})
+	}
+	down(t.Logf) // reclaim a stack a hard-killed previous run may have leaked
+	t.Cleanup(func() { down(t.Logf) })
 	cmd := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "up", "-d")
 	cmd.Dir = c.dir
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -261,4 +280,24 @@ func WaitHTTPHealthy(t *testing.T, name, url string, timeout time.Duration) {
 		time.Sleep(300 * time.Millisecond)
 	}
 	t.Fatalf("compose service %s never became healthy at %s", name, url)
+}
+
+// WaitForSubscriberHTTP is WaitForSubscriber's compose twin: it polls the
+// broker's monitoring endpoint (/subsz?subs=1) until subject has a subscriber.
+func WaitForSubscriberHTTP(t *testing.T, monitorBase, subject string, timeout time.Duration) {
+	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(monitorBase + "/subsz?subs=1")
+		if err == nil {
+			body, rerr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if rerr == nil && strings.Contains(string(body), `"`+subject+`"`) {
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("compose: no subscriber on %q after %s", subject, timeout)
 }

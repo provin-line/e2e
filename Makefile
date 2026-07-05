@@ -34,6 +34,7 @@ test:
 test-simple:
 	go test ./scenarios/simple/... -count=1 -timeout 10m -v
 
-## Run the compose-runtime scenarios (requires make docker-build)
+## Run the compose-runtime scenarios (requires make docker-build).
+## -p 1: one compose stack at a time — five concurrent stacks flake on slower hosts.
 test-compose:
-	E2E_RUNTIME=compose go test ./scenarios/simple/... -count=1 -timeout 15m -v
+	E2E_RUNTIME=compose go test -p 1 ./scenarios/... -count=1 -timeout 40m
