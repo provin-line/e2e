@@ -125,6 +125,7 @@ func TestLongChain_DeepAuditAndWireTraversal(t *testing.T) {
 	baseURL := "http://127.0.0.1" + listenAddr
 	loops, pipelines, processes := loopsBlock(listenAddr)
 	cfg := harness.NodeConfig{
+		AllowLoopback:   true,
 		ListenAddr:      listenAddr,
 		RegistryID:      registryID,
 		PDPBaseURL:      pdpURL,

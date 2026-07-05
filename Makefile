@@ -6,7 +6,7 @@ REPOS_DIR := repos
 REPOS := \
 	oss|git@github.com:provin-line/oss.git
 
-.PHONY: clone docker-build test test-simple
+.PHONY: clone docker-build test test-simple test-compose
 
 ## Clone or update dependency repositories
 clone:
@@ -33,3 +33,7 @@ test:
 
 test-simple:
 	go test ./scenarios/simple/... -count=1 -timeout 10m -v
+
+## Run the compose-runtime scenarios (requires make docker-build)
+test-compose:
+	E2E_RUNTIME=compose go test ./scenarios/simple/... -count=1 -timeout 15m -v

@@ -111,6 +111,7 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	mfgNode := harness.StartNode(t, "manufacturer", bin, mfgDir, mfgListen, harness.NodeConfig{
+		AllowLoopback:   true,
 		ListenAddr:      mfgListen,
 		RegistryID:      registryID,
 		PDPBaseURL:      mfgPDP,
@@ -132,6 +133,7 @@ func TestSupplyChain_CrossOrgGrantAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	retailNode := harness.StartNode(t, "retailer", bin, retailDir, retailListen, harness.NodeConfig{
+		AllowLoopback:   true,
 		ListenAddr:      retailListen,
 		RegistryID:      registryID,
 		PDPBaseURL:      retailPDP,

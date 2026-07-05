@@ -10,10 +10,12 @@ Every scenario runs in one of two equivalent runtimes:
 - **process** (default): the harness builds `cmd/standalone` from `repos/oss`,
   runs it and a real `nats-server` as local subprocesses, and drives the
   scenario over real TCP ports. No Docker required.
-- **compose** (PENDING): each scenario ships a `docker-compose.yml` describing
-  the same topology as containers (images built by `make docker-build`), but
-  compose execution and its provisioning step are not wired up yet — the
-  process runtime is the reference execution today.
+- **compose**: the same topology as containers (`E2E_RUNTIME=compose`).
+  Provisioning artifacts (NATS operator/account seeds, account JWTs, broker
+  config, node configs) are generated into the scenario's `testdata/` by the
+  test itself; images come from `make docker-build`. Wired for `simple`;
+  the other scenarios' compose twins are a recorded deferral (scope findings
+  log #18).
 
 Note: `make clone` fetches `repos/oss` from GitHub; a local development
 checkout may instead symlink `repos/oss` to a working copy, in which case the

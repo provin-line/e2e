@@ -7,6 +7,10 @@
 // reads results back over the wire only: sink stdout, ResolveVC, GetAuditStatus,
 // the public /did/ resolution route — and re-verifies the sink-consumed
 // credential cryptographically with the product's own vc.Verifier.
+//
+// Runtimes: process (default — subprocess binary + in-harness broker) and
+// compose (E2E_RUNTIME=compose — the docker-compose.yml topology with
+// provisioning generated into testdata/). Both drive the same assertions.
 package simple
 
 import (
@@ -16,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -47,7 +52,10 @@ const (
 	ingressSubject = "ingest.src"
 )
 
-func loopsBlock(listenAddr string) string {
+// loopsBlock renders the three loops; selfBase is the node's own control-plane
+// base URL AS THE NODE REACHES IT (loopback in process mode, its compose
+// service name in compose mode).
+func loopsBlock(selfBase string) string {
 	return fmt.Sprintf(`
       src {
         role            = "source"
@@ -76,7 +84,7 @@ func loopsBlock(listenAddr string) string {
           process-id            = "r1"
           transformation-claim  = "convert"
           verification-strategy = "adjacent"
-          upstream-endpoint     = "http://127.0.0.1%s"
+          upstream-endpoint     = %q
           converter             = "$merge([$, {'relayed': true}])"
         }
       }
@@ -86,16 +94,35 @@ func loopsBlock(listenAddr string) string {
         sink {
           kind                  = "observation-only"
           verification-strategy = "adjacent"
-          upstream-endpoint     = "http://127.0.0.1%s"
+          upstream-endpoint     = %q
         }
       }`,
 		ingressSubject, srcPipelineDID, srcProcessDID, srcProcessDID+"#signing",
-		srcPipelineDID, relayPipelineDID, relayProcessDID, relayProcessDID+"#signing", listenAddr,
-		relayPipelineDID, listenAddr)
+		srcPipelineDID, relayPipelineDID, relayProcessDID, relayProcessDID+"#signing", selfBase,
+		relayPipelineDID, selfBase)
+}
+
+const tunables = `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
+    audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`
+
+// env is what the shared scenario body needs from either runtime.
+type env struct {
+	nodeBase  string // control-plane base URL, host-reachable
+	natsURL   string // broker URL, host-reachable
+	acctSeed  string // acme account seed for the producer connection
+	sinkLines func() []string
 }
 
 func TestSimple_SourceChainedSink(t *testing.T) {
-	ctx := context.Background()
+	if harness.ComposeRuntime() {
+		runScenario(t, setupCompose(t))
+		return
+	}
+	runScenario(t, setupProcess(t))
+}
+
+// setupProcess boots the process runtime: in-harness broker + subprocess node.
+func setupProcess(t *testing.T) env {
 	bin := harness.BuildStandalone(t)
 	listenAddr := harness.FreePort(t)
 	pdpURL := harness.StartPDPStub(t, harness.FreePort(t))
@@ -106,6 +133,7 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 
 	baseURL := "http://127.0.0.1" + listenAddr
 	cfg := harness.NodeConfig{
+		AllowLoopback:   true,
 		ListenAddr:      listenAddr,
 		RegistryID:      registryID,
 		PDPBaseURL:      pdpURL,
@@ -116,9 +144,8 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 		NodeDID:         ownerDID,
 		ResolverBaseURL: baseURL,
 		VCStoreEndpoint: baseURL,
-		LoopsBlock:      loopsBlock(listenAddr),
-		Extra: `    batch-resolver { interval = 1s, batch-size = 64, max-retries = 5, max-depth = 1024 }
-    audit-runner { interval = 1s, batch-size = 64, max-attempts = 10 }`,
+		LoopsBlock:      loopsBlock(baseURL),
+		Extra:           tunables,
 	}
 
 	nodeDir := filepath.Join(workDir, "acme-node")
@@ -126,39 +153,97 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 		t.Fatal(err)
 	}
 	node := harness.StartNode(t, "acme", bin, nodeDir, listenAddr, cfg.Render())
+	return env{
+		nodeBase:  node.BaseURL,
+		natsURL:   broker.URL,
+		acctSeed:  acme.Seed,
+		sinkLines: node.SinkLines,
+	}
+}
+
+// setupCompose provisions testdata/, boots the docker-compose topology, and
+// adapts it to env. Requires the images from `make docker-build`.
+func setupCompose(t *testing.T) env {
+	scenarioDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	testdata := filepath.Join(scenarioDir, "testdata")
+	if err := os.RemoveAll(testdata); err != nil {
+		t.Fatal(err)
+	}
+
+	prov := harness.ProvisionCompose(t, testdata, "acme")
+	prov.WriteBrokerConfig(t)
+
+	const selfBase = "http://acme:8443"
+	prov.WriteNodeConfig(t, "acme", harness.NodeConfig{
+		AllowPrivateNetworks: true,
+		ListenAddr:           ":8443",
+		RegistryID:           registryID,
+		PDPBaseURL:           "http://pdpstub:9091",
+		NATSURL:              "nats://nats:4222",
+		AccountSeedFile:      "/app/secrets/acme-account.seed",
+		TrustSeedFile:        "/app/secrets/operator.seed",
+		ResolverDir:          "/app/jwts",
+		NodeDID:              ownerDID,
+		ResolverBaseURL:      selfBase,
+		VCStoreEndpoint:      selfBase,
+		LoopsBlock:           loopsBlock(selfBase),
+		Extra:                tunables,
+	})
+
+	c := harness.ComposeUp(t, scenarioDir, "e2e-simple-"+strconv.Itoa(os.Getpid()))
+	natsMon := c.Port(t, "nats", 8222)
+	harness.WaitHTTPHealthy(t, "nats", "http://"+natsMon+"/healthz", 60*time.Second)
+	acmeAddr := c.Port(t, "acme", 8443)
+	nodeBase := "http://" + acmeAddr
+	harness.WaitHTTPHealthy(t, "acme", nodeBase+"/healthz", 60*time.Second)
+
+	seed, err := os.ReadFile(filepath.Join(testdata, "acme-account.seed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env{
+		nodeBase:  nodeBase,
+		natsURL:   "nats://" + c.Port(t, "nats", 4222),
+		acctSeed:  strings.TrimSpace(string(seed)),
+		sinkLines: func() []string { return c.SinkLines(t, "acme") },
+	}
+}
+
+// runScenario is the runtime-independent story: bootstrap, stimulate, assert.
+func runScenario(t *testing.T, e env) {
+	ctx := context.Background()
 
 	// Operator bootstrap over the wire: owner + pipelines + processes. The
 	// registry mints and holds the process signing keys (KMS model).
 	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, node.BaseURL, owner,
+	harness.Bootstrap(t, e.nodeBase, owner,
 		[]string{srcPipelineDID, relayPipelineDID},
 		[]string{srcProcessDID, relayProcessDID},
 	)
 
 	// Inject one raw JSON reading as an external producer on the account.
-	conn, err := natstransport.Connect(natstransport.Config{URL: broker.URL, AccountSeed: acme.Seed})
+	conn, err := natstransport.Connect(natstransport.Config{URL: e.natsURL, AccountSeed: e.acctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}
 	defer conn.Close()
-	input := []byte(`{"reading":42}`)
-	if err := conn.Publisher(ingressSubject).Publish(input); err != nil {
+	if err := conn.Publisher(ingressSubject).Publish([]byte(`{"reading":42}`)); err != nil {
 		t.Fatalf("publish input: %v", err)
 	}
 
 	// The sink emits one NDJSON record on the node's stdout.
-	var sinkRec struct {
+	type sinkRecord struct {
 		Credential string          `json:"credential"`
 		Confidence string          `json:"confidence"`
 		Payload    json.RawMessage `json:"payload"`
 	}
+	var sinkRec sinkRecord
 	harness.WaitFor(t, "sink NDJSON record", 60*time.Second, func() bool {
-		for _, line := range node.SinkLines() {
-			var rec struct {
-				Credential string          `json:"credential"`
-				Confidence string          `json:"confidence"`
-				Payload    json.RawMessage `json:"payload"`
-			}
+		for _, line := range e.sinkLines() {
+			var rec sinkRecord
 			if json.Unmarshal([]byte(line), &rec) == nil && rec.Credential != "" {
 				sinkRec = rec
 				return true
@@ -183,7 +268,7 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 
 	// Fetch the sink-consumed credential over the wire and re-verify it with
 	// the product's own verifier against the node's public DID resolution route.
-	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, node.BaseURL)
+	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, e.nodeBase)
 	resolved, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: sinkRec.Credential})))
 	if err != nil {
 		t.Fatalf("ResolveVC(%s): %v", sinkRec.Credential, err)
@@ -197,7 +282,7 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 	}
 	guard := core.NewURLGuard(core.WithAllowLoopback(true))
 	didres := didresolver.New(guard, didresolver.WithRegistryBaseURL(func(string) (string, error) {
-		return node.BaseURL, nil
+		return e.nodeBase, nil
 	}))
 	verifier := vc.NewVerifier(didres, ed25519.Verifier{})
 	vres, err := verifier.Verify(ctx, &cred)
@@ -209,7 +294,7 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 	}
 
 	// The async audit runner records a linear-chain verdict for the consumed head.
-	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, node.BaseURL)
+	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, e.nodeBase)
 	harness.WaitFor(t, "audit VERIFIED for head "+sinkRec.Credential, 60*time.Second, func() bool {
 		st, err := auditClient.GetAuditStatus(ctx, harness.Bearer(connect.NewRequest(&auditpb.GetAuditStatusRequest{
 			HeadHash: sinkRec.Credential,

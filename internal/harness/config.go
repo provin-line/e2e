@@ -21,6 +21,12 @@ type NodeConfig struct {
 	VCStoreEndpoint string // optional; producing loops publish credentials here
 	LoopsBlock      string // contents of pipeline.loops { ... }, may be empty
 
+	// SSRF-guard opt-ins. Process runtime nodes talk to loopback peers
+	// (AllowLoopback); compose runtime nodes talk over the container network's
+	// RFC 1918 addresses (AllowPrivateNetworks).
+	AllowLoopback        bool
+	AllowPrivateNetworks bool
+
 	// Extra is appended verbatim inside provin.network.pipeline for node-level
 	// tuning overrides (e.g. audit-runner intervals). Optional.
 	Extra string
@@ -33,8 +39,8 @@ func (c NodeConfig) Render() string {
   core {
     listen-addr = %q
     data-dir    = "./data"
-    # e2e nodes talk to loopback peers (PDP stub, their own resolver route).
-    dev.allow-loopback = true
+    dev.allow-loopback     = %v
+    allow-private-networks = %v
   }
   auth.policy-verifier-url = %q
   registry { id = %q }
@@ -50,7 +56,7 @@ func (c NodeConfig) Render() string {
     }
   }
   pipeline {
-`, c.ListenAddr, c.PDPBaseURL, c.RegistryID,
+`, c.ListenAddr, c.AllowLoopback, c.AllowPrivateNetworks, c.PDPBaseURL, c.RegistryID,
 		c.NATSURL, c.AccountSeedFile, c.TrustSeedFile, c.ResolverDir, c.NodeDID, c.ResolverBaseURL)
 	if c.VCStoreEndpoint != "" {
 		fmt.Fprintf(&b, "    vc-store-endpoint = %q\n", c.VCStoreEndpoint)
