@@ -30,12 +30,17 @@ make docker-build  # Build Docker images from cloned repos (compose runtime)
 
 ## Structure
 
-```
+```text
 e2e/
 ├── repos/                 ← Cloned dependency repos (.gitignore'd)
 │   └── oss/               ← provin-line/oss
 ├── scenarios/
-│   └── simple/            ← single-org source→chained→sink pipeline story
+│   ├── simple/            ← single-org source→chained→sink pipeline story
+│   ├── branching/         ← fan-out + complementary-filter delivery matrix
+│   ├── longchain/         ← 10-hop relay, wire chain walk, deep audit
+│   ├── sensoraggregate/   ← aggregate window fold + source-commitment audits
+│   ├── supplychain/       ← three orgs, own registries, cross-org grants
+│   └── httpingest/        ← ingestion over the apipush HTTP surface
 ├── cmd/pdpstub/           ← allow-all policy-verifier (PDP) stub for scenarios
 ├── internal/harness/      ← provisioning + node lifecycle + assertion helpers
 └── Makefile
