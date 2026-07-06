@@ -14,6 +14,20 @@ type SingleNodeEnv struct {
 	NATSURL   string // broker URL, host-reachable
 	AcctSeed  string // the account seed for producer connections
 	SinkLines func() []string
+	// RestartNode stops and restarts the standalone node with its SAME data
+	// dir, blocking until it is healthy and its loops resubscribed (the
+	// spec's IngressSubjects), and returns the node's base URL VALID AFTER
+	// the restart. A deployment restart: file-backed state survives,
+	// in-memory state is lost. Two runtime divergences a scenario must
+	// respect: (1) the compose runtime re-publishes ephemeral host ports on
+	// restart, so the pre-restart NodeBase may be stale — use the returned
+	// URL (and rebuild clients) for everything after the restart; (2) sink
+	// output — the process runtime starts a fresh stream, compose
+	// accumulates docker logs — so match sink records with payloads distinct
+	// per phase.
+	RestartNode func() string
+	// StopNode stops the node and leaves it down (the broker keeps running).
+	StopNode func()
 }
 
 // SingleNodeSpec describes a one-node scenario topology: one NATS account, one
@@ -84,14 +98,24 @@ func startSingleNodeProcess(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 		t.Fatal(err)
 	}
 	node := StartNode(t, spec.Account, bin, nodeDir, listenAddr, cfg.Render())
-	for _, subj := range spec.IngressSubjects {
-		broker.WaitForSubscriber(t, subj, 30*time.Second)
+	waitSubscribed := func() {
+		for _, subj := range spec.IngressSubjects {
+			broker.WaitForSubscriber(t, subj, 30*time.Second)
+		}
 	}
+	waitSubscribed()
 	return SingleNodeEnv{
 		NodeBase:  node.BaseURL,
 		NATSURL:   broker.URL,
 		AcctSeed:  acct.Seed,
-		SinkLines: node.SinkLines,
+		SinkLines: func() []string { return node.SinkLines() },
+		RestartNode: func() string {
+			node.Stop(t)
+			node = StartNode(t, spec.Account, bin, nodeDir, listenAddr, cfg.Render())
+			waitSubscribed()
+			return node.BaseURL // the process runtime rebinds the same port
+		},
+		StopNode: func() { node.Stop(t) },
 	}
 }
 
@@ -145,5 +169,17 @@ func startSingleNodeCompose(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 		NATSURL:   "nats://" + c.Port(t, "nats", 4222),
 		AcctSeed:  strings.TrimSpace(string(seed)),
 		SinkLines: func() []string { return c.SinkLines(t, spec.Account) },
+		RestartNode: func() string {
+			c.RestartService(t, spec.Account)
+			// Ephemeral host ports are re-allocated on container restart:
+			// rediscover the published mapping before waiting on it.
+			newBase := "http://" + c.Port(t, spec.Account, 8443)
+			WaitHTTPHealthy(t, spec.Account, newBase+"/healthz", 60*time.Second)
+			for _, subj := range spec.IngressSubjects {
+				WaitForSubscriberHTTP(t, "http://"+natsMon, subj, 60*time.Second)
+			}
+			return newBase
+		},
+		StopNode: func() { c.StopService(t, spec.Account) },
 	}
 }

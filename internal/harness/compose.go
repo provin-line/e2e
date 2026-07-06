@@ -203,6 +203,30 @@ func ComposeUp(t *testing.T, scenarioDir string) *Compose {
 	return c
 }
 
+// RestartService restarts one service's process in its EXISTING container
+// (docker compose restart): container-local files (e.g. the node's /app/data
+// stores) survive, in-memory state is lost, and published port mappings are
+// preserved — the container twin of restarting a subprocess with its data dir.
+func (c *Compose) RestartService(t *testing.T, service string) {
+	t.Helper()
+	cmd := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "restart", service)
+	cmd.Dir = c.dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compose restart %s: %v\n%s", service, err, out)
+	}
+}
+
+// StopService stops one service and leaves it down (an explicit stop is not
+// subject to the service's restart policy).
+func (c *Compose) StopService(t *testing.T, service string) {
+	t.Helper()
+	cmd := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "stop", service)
+	cmd.Dir = c.dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compose stop %s: %v\n%s", service, err, out)
+	}
+}
+
 // Port returns the host-published address ("127.0.0.1:<hostport>") for a
 // service's container port. It retries briefly: a restarting service (e.g. a
 // node that failed closed before its broker accepted connections) has no
