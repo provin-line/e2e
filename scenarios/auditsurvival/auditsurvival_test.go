@@ -161,7 +161,7 @@ func ingestAndAudit(t *testing.T, e harness.SingleNodeEnv, rawJSON string, wantR
 	t.Helper()
 	ctx := context.Background()
 
-	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
+	conn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}

@@ -147,7 +147,7 @@ func TestSupplyChain_ThreeOrgsOwnRegistries(t *testing.T) {
 	// The eavesdropper listens on both cross-org subjects in its own account:
 	// without grants it must receive nothing. The self-publish control proves
 	// the subscriptions can deliver at all.
-	eveConn, err := natstransport.Connect(natstransport.Config{URL: e.natsURL, AccountSeed: e.eveSeed})
+	eveConn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.natsURL, AccountSeed: e.eveSeed})
 	if err != nil {
 		t.Fatalf("eavesdropper connect: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestSupplyChain_ThreeOrgsOwnRegistries(t *testing.T) {
 	}
 
 	// The manufacturer's plant system reports one lot's emission record.
-	mfgConn, err := natstransport.Connect(natstransport.Config{URL: e.natsURL, AccountSeed: e.mfgSeed})
+	mfgConn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.natsURL, AccountSeed: e.mfgSeed})
 	if err != nil {
 		t.Fatalf("manufacturer connect: %v", err)
 	}

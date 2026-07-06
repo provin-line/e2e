@@ -130,7 +130,7 @@ func TestLongChain_DeepAuditAndWireTraversal(t *testing.T) {
 	owner := harness.NewOwner(t, ownerDID)
 	harness.Bootstrap(t, e.NodeBase, owner, pipelines, processes)
 
-	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
+	conn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}

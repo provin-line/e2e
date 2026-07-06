@@ -123,7 +123,7 @@ func runScenario(t *testing.T, e harness.SingleNodeEnv) {
 	)
 
 	// Inject one raw JSON reading as an external producer on the account.
-	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
+	conn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}

@@ -11,6 +11,7 @@
 package branching
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -140,7 +141,7 @@ func TestBranching_FanOutAndFilterDrop(t *testing.T) {
 		[]string{srcProcessDID, highProcessDID, lowProcessDID},
 	)
 
-	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
+	conn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}
