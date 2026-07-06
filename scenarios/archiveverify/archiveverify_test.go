@@ -1,48 +1,50 @@
 // Scenario archiveverify: the auditor verifies AFTER the infrastructure died.
 //
 // Story: during live operation, a relying party archives what a later audit
-// needs — the credential bytes (content-addressed, proof embedded) and the
-// issuers' DID documents (the verification keys, served on the public /did/
-// route). Then the node is gone: decommissioned, the vendor folded, the
+// needs. Then the node is gone: decommissioned, the vendor folded, the
 // evidence subpoenaed years later. The auditor re-verifies the ENTIRE chain
-// from the archived bytes alone — no registry, no broker, no provin service.
+// from the archive alone — no registry, no broker, no provin service.
 //
 // This pins provin's strongest survivability property: verification does not
 // depend on any live infrastructure. Credentials carry their proofs
 // (EdDSA-JCS-2022) and chain links (previousCredential content addresses)
-// inside the signed body, so bytes + public keys are sufficient forever.
-// (The broker stays up — it is irrelevant: the verifier's only outward
-// dependency is the resolver, and the offline resolver is a map. The node,
-// which serves every surface a verifier COULD reach, is stopped and asserted
-// dead.)
+// inside the signed body, so bytes + the archived authority documents are
+// sufficient forever.
 //
-// It also documents the flip side (finding): the archive format used here —
-// "credential JSON + the /did/ document JSON per issuer" — is INVENTED BY
-// THIS TEST. The product defines no snapshot/export convention, so every
-// relying party must improvise one; until a convention exists, the
-// survivability property is real but unclaimable in practice.
+// HISTORY: this scenario originally had to INVENT its archive format — the
+// product defined no snapshot/export convention, so the survivability
+// property was real but unclaimable in practice (finding #24), and the
+// authority-chain rider (signing keys alone are NOT a sufficient archive;
+// the controller walk needs process AND pipeline AND owner documents) was
+// discovered by this test failing. The product convention has since landed:
+// the audit bundle (`provin bundle export` / `provin bundle verify`), whose
+// exporter archives exactly what verification resolves. This scenario now
+// runs the REAL CLI end to end: export live over the wire surfaces, kill
+// the node, re-verify offline anchored by the head (what data flowed) and
+// the bundle digest (who signed it — proofs and documents are outside the
+// content address and only the digest covers them), then prove tampering is
+// caught.
 //
 // Runtimes: process (default) and compose (E2E_RUNTIME=compose).
 package archiveverify
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"connectrpc.com/connect"
 
-	"github.com/provin-line/oss/crypto/ed25519"
-	"github.com/provin-line/oss/did"
 	vcpb "github.com/provin-line/oss/gen/go/dplaax/vc/v1"
 	"github.com/provin-line/oss/gen/go/dplaax/vc/v1/vcpbconnect"
 	natstransport "github.com/provin-line/oss/pipeline/transport/nats"
-	"github.com/provin-line/oss/vc"
 
 	"github.com/provin-line/e2e/internal/harness"
 )
@@ -106,41 +108,21 @@ func loopsBlock(selfBase string) string {
 		relayPipelineDID, selfBase)
 }
 
-// archive is what the relying party keeps: credential bytes by content
-// address, issuer DID documents by DID. THIS FORMAT IS AD HOC — see the
-// package comment; the product defines no snapshot convention.
-type archive struct {
-	credentials map[string][]byte
-	didDocs     map[string][]byte
-}
-
-// Resolve implements the product's resolver contract over archived documents
-// only — the offline auditor's resolver. It can, by construction, reach no
-// network.
-func (a *archive) Resolve(_ context.Context, didStr string) (*did.DIDDocument, error) {
-	raw, ok := a.didDocs[didStr]
-	if !ok {
-		return nil, fmt.Errorf("archive: no DID document archived for %s", didStr)
-	}
-	var doc did.DIDDocument
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("archive: parse archived document for %s: %w", didStr, err)
-	}
-	return &doc, nil
-}
-
-// didDocURL converts a dplaax DID into its public W3C resolution route on the
-// issuing node: /did/<path segments>/did.json.
-func didDocURL(t *testing.T, nodeBase, didStr string) string {
+// provin runs one CLI invocation and returns combined output; ok reflects
+// the exit status. The CLI is the product surface a relying party actually
+// operates — the scenario asserts on its exit codes and printed contract.
+func provin(t *testing.T, cli string, args ...string) (output string, ok bool) {
 	t.Helper()
-	rest, ok := strings.CutPrefix(didStr, "did:dplaax:"+registryID+":")
-	if !ok {
-		t.Fatalf("DID %q is not under registry %s", didStr, registryID)
-	}
-	return nodeBase + "/did/" + strings.ReplaceAll(rest, ":", "/") + "/did.json"
+	cmd := exec.Command(cli, args...)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	return buf.String(), err == nil
 }
 
 func TestArchiveVerify_ChainOutlivesInfrastructure(t *testing.T) {
+	cli := harness.BuildProvinCLI(t)
 	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "acme",
 		RegistryID:      registryID,
@@ -157,8 +139,8 @@ func TestArchiveVerify_ChainOutlivesInfrastructure(t *testing.T) {
 		[]string{srcProcessDID, relayProcessDID},
 	)
 
-	// --- Live phase: run the story and take the archive. ---
-	conn, err := natstransport.Connect(natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
+	// --- Live phase: run the story, learn the head from the sink. ---
+	conn, err := natstransport.Connect(ctx, natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
 		t.Fatalf("nats connect: %v", err)
 	}
@@ -167,111 +149,84 @@ func TestArchiveVerify_ChainOutlivesInfrastructure(t *testing.T) {
 		t.Fatalf("publish input: %v", err)
 	}
 
-	type sinkRecord struct {
-		Credential string `json:"credential"`
-		Confidence string `json:"confidence"`
-	}
 	var head string
 	harness.WaitFor(t, "sink record", 60*time.Second, func() bool {
 		for _, line := range e.SinkLines() {
-			var rec sinkRecord
-			if json.Unmarshal([]byte(line), &rec) == nil && rec.Credential != "" {
-				head = rec.Credential
-				return true
+			if i := strings.Index(line, `"credential":"`); i >= 0 {
+				rest := line[i+len(`"credential":"`):]
+				if j := strings.IndexByte(rest, '"'); j > 0 {
+					head = rest[:j]
+					return true
+				}
 			}
 		}
 		return false
 	})
 
-	arch := &archive{credentials: map[string][]byte{}, didDocs: map[string][]byte{}}
-
-	// Walk the chain over the wire while it is still alive: head (relay), then
-	// its predecessor (src FirstDrop), archiving raw bytes by content address.
-	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, e.NodeBase)
-	fetch := func(hash string) *vc.PipelinePassCredential {
-		t.Helper()
-		res, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: hash})))
-		if err != nil {
-			t.Fatalf("ResolveVC(%s): %v", hash, err)
-		}
-		raw := res.Msg.GetCredential()
-		arch.credentials[hash] = raw
-		var cred vc.PipelinePassCredential
-		if err := json.Unmarshal(raw, &cred); err != nil {
-			t.Fatalf("unmarshal credential %s: %v", hash, err)
-		}
-		return &cred
+	// --- The relying party takes the archive: the PRODUCT's command, over
+	// the product's wire surfaces (ResolveVC + the public /did/ route). ---
+	dir := filepath.Join(t.TempDir(), "bundle")
+	out, ok := provin(t, cli, "bundle", "export",
+		"--registry", e.NodeBase,
+		"--token", harness.BearerToken,
+		"--head", head,
+		"--out", dir,
+		"--did-base", registryID+"="+e.NodeBase,
+		"--allow-loopback",
+	)
+	if !ok {
+		t.Fatalf("bundle export failed:\n%s", out)
 	}
-	headCred := fetch(head)
-	if headCred.PreviousCredential() == "" {
-		t.Fatal("head credential has no previousCredential — expected the relay hop")
+	var digest string
+	for _, line := range strings.Split(out, "\n") {
+		if rest, found := strings.CutPrefix(line, "bundle digest: "); found {
+			digest = strings.TrimSpace(rest)
+		}
 	}
-	fetch(headCred.PreviousCredential())
-
-	// Archive the DID documents from the PUBLIC resolution route — the part
-	// of the archive anyone can take without credentials. The signing keys
-	// alone are NOT enough: signer-authenticity walks the controller chain
-	// (process → pipeline → owner) to a self-controlled terminal owner, so a
-	// usable audit archive must snapshot the WHOLE authority chain. (Learned
-	// empirically: archiving only the process docs leaves that axis
-	// indeterminate — prime content for the missing snapshot convention.)
-	for _, d := range []string{srcProcessDID, relayProcessDID, srcPipelineDID, relayPipelineDID, ownerDID} {
-		resp, err := http.Get(didDocURL(t, e.NodeBase, d))
-		if err != nil {
-			t.Fatalf("GET did doc for %s: %v", d, err)
-		}
-		raw, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil || resp.StatusCode != http.StatusOK {
-			t.Fatalf("read did doc for %s: status %d, err %v", d, resp.StatusCode, readErr)
-		}
-		arch.didDocs[d] = raw
+	if digest == "" {
+		t.Fatalf("export did not print the bundle digest — the out-of-band anchor is the convention's deliverable:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "manifest.json")); err != nil {
+		t.Fatalf("exported bundle has no manifest: %v", err)
 	}
 
 	// --- The infrastructure dies. ---
 	e.StopNode()
+	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, e.NodeBase)
 	if _, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: head}))); err == nil {
 		t.Fatal("node still serving after StopNode — the offline claim below would be hollow")
 	}
 
-	// --- Offline phase: the auditor has only the archive. ---
-	verifier := vc.NewVerifier(arch, ed25519.Verifier{})
-	verifyArchived := func(hash, wantIssuer string) *vc.PipelinePassCredential {
-		t.Helper()
-		var cred vc.PipelinePassCredential
-		if err := json.Unmarshal(arch.credentials[hash], &cred); err != nil {
-			t.Fatalf("archived credential %s: %v", hash, err)
-		}
-		if got, err := cred.Hash(); err != nil || got != hash {
-			t.Fatalf("archived credential content address = %q (err %v), want %q", got, err, hash)
-		}
-		if cred.Issuer() != wantIssuer {
-			t.Fatalf("archived credential issuer = %q, want %q", cred.Issuer(), wantIssuer)
-		}
-		vres, err := verifier.Verify(context.Background(), &cred)
-		if err != nil || vres.Overall != vc.ConfidenceVerified {
-			t.Fatalf("offline verify %s: overall=%v err=%v", hash, vres, err)
-		}
-		return &cred
+	// --- Offline phase: the auditor has the bundle, the head, the digest —
+	// and nothing else. The verify command never dials by construction. ---
+	out, ok = provin(t, cli, "bundle", "verify",
+		"--bundle", dir,
+		"--head", head,
+		"--digest", digest,
+	)
+	if !ok {
+		t.Fatalf("offline bundle verify failed:\n%s", out)
+	}
+	if !strings.Contains(out, "overall:             VERIFIED") {
+		t.Errorf("verify output missing the VERIFIED verdict:\n%s", out)
+	}
+	if !strings.Contains(out, "anchors checked:     head=true digest=true") {
+		t.Errorf("verify did not confirm both external anchors:\n%s", out)
 	}
 
-	offlineHead := verifyArchived(head, relayProcessDID)
-	pred := verifyArchived(offlineHead.PreviousCredential(), srcProcessDID)
-
-	// The chain link is inside the signed bytes: the head's previousCredential
-	// IS the predecessor's content address, and the origin is a FirstDrop.
-	if pc := pred.PreviousCredential(); pc != "" {
-		t.Errorf("origin credential has previousCredential %q, want a FirstDrop", pc)
+	// --- Tamper-evidence: one flipped byte anywhere in the archive breaks
+	// the digest anchor's coverage (proofs and documents included). ---
+	headFile := filepath.Join(dir, "credentials", strings.TrimPrefix(head, "sha256:")+".json")
+	raw, err := os.ReadFile(headFile)
+	if err != nil {
+		t.Fatalf("read archived head credential: %v", err)
 	}
-
-	// The product's own CHAIN verdict, offline: VerifyChain layers the
-	// cross-credential structure checks per-credential Verify cannot see —
-	// the data-flow invariant (outputHash[n] == inputHash[n+1]),
-	// previousCredential linkage, the no-predecessor-at-origin rule,
-	// proof.created monotonicity. With the node down this is the only chain
-	// verdict obtainable at all (the async audit runner died with the node).
-	cres, err := verifier.VerifyChain(context.Background(), []*vc.PipelinePassCredential{pred, offlineHead})
-	if err != nil || cres.Overall != vc.ConfidenceVerified {
-		t.Fatalf("offline VerifyChain: overall=%v err=%v", cres, err)
+	raw[len(raw)/2] ^= 0x01
+	if err := os.WriteFile(headFile, raw, 0o644); err != nil {
+		t.Fatalf("tamper archived credential: %v", err)
+	}
+	out, ok = provin(t, cli, "bundle", "verify", "--bundle", dir, "--head", head, "--digest", digest)
+	if ok {
+		t.Fatalf("verify accepted a tampered bundle:\n%s", out)
 	}
 }

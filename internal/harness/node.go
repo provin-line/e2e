@@ -268,3 +268,38 @@ func StartPDPStub(t *testing.T, addr string) (baseURL string) {
 	t.Fatalf("pdp stub never became healthy on %s (serve error: %s)", addr, serveErr.String())
 	return ""
 }
+
+// BuildProvinCLI compiles cmd/provin (the operator / relying-party CLI) from
+// the cloned oss repo once per test binary and returns the executable path —
+// the same clobber-avoidance keying as BuildStandalone. Scenarios exercising
+// product commands (bundle export/verify) run the REAL binary a relying
+// party would run, not a library shortcut.
+func BuildProvinCLI(t *testing.T) string {
+	t.Helper()
+	cliOnce.Do(func() {
+		root := repoRoot(t)
+		out := filepath.Join(root, ".tmp", "provin-"+filepath.Base(os.Args[0]))
+		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
+			cliErr = err
+			return
+		}
+		cmd := exec.Command("go", "build", "-o", out, "./cmd/provin")
+		cmd.Dir = filepath.Join(root, "repos", "oss")
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		if b, err := cmd.CombinedOutput(); err != nil {
+			cliErr = fmt.Errorf("go build cmd/provin: %v\n%s", err, b)
+			return
+		}
+		cliPath = out
+	})
+	if cliErr != nil {
+		t.Fatalf("BuildProvinCLI: %v", cliErr)
+	}
+	return cliPath
+}
+
+var (
+	cliOnce sync.Once
+	cliPath string
+	cliErr  error
+)
