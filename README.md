@@ -41,7 +41,7 @@ e2e/
 │   ├── sensoraggregate/   ← aggregate window fold + source-commitment audits
 │   ├── supplychain/       ← three orgs, own registries, cross-org grants
 │   ├── httpingest/        ← ingestion over the apipush HTTP surface
-│   ├── auditsurvival/     ← restart: identity survives, evidence does not (canary)
+│   ├── auditsurvival/     ← restart: identity AND evidence survive (flipped canary)
 │   └── archiveverify/     ← offline chain re-verification after infra death
 ├── cmd/pdpstub/           ← allow-all policy-verifier (PDP) stub for scenarios
 ├── internal/harness/      ← provisioning + node lifecycle + assertion helpers

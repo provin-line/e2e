@@ -4,22 +4,21 @@
 // records VERIFIED — then the node restarts (a deploy, a crash, a host
 // reboot). The auditor asks the same two questions as before the restart:
 // "show me the credential" (ResolveVC) and "what was the verdict"
-// (GetAuditStatus).
+// (GetAuditStatus) — and gets the same answers.
 //
-// This scenario PINS THE CURRENT PoC POSTURE, deliberately: the node's
-// control-plane state (DIDs, keys, schemas, chain subscriptions) is
-// file-backed and survives, so identity and signing capability outlive the
-// process — but the provenance EVIDENCE (VC store, audit verdicts, receipts,
-// emission log) is in-memory and does not. A restart erases exactly the part
-// a later audit needs. The assertions below encode that split:
+// HISTORY: this scenario began life as the CANARY for the in-memory-evidence
+// gap (findings #23): it asserted that a restart ERASES the evidence while
+// identity survives, with instructions to flip when persistence landed. The
+// evidence-persistence slice landed (file-backed CAS under data-dir/evidence/)
+// and the canary fired exactly as designed; the assertions below are the
+// flipped, permanent contract:
 //
 //   - survives: DID resolution (control plane), the ability to ingest and
-//     verify NEW readings under the same identities;
-//   - lost:     ResolveVC of the pre-restart head, its audit verdict.
+//     verify NEW readings under the same identities — AND the pre-restart
+//     evidence: ResolveVC serves the same credential bytes, GetAuditStatus
+//     serves the same VERIFIED verdict.
 //
-// When evidence persistence lands in oss, the "lost" assertions MUST flip to
-// survival assertions — this test is the canary for that slice, not a
-// desirable contract.
+// A regression back to evidence loss fails these assertions loudly.
 //
 // Runtimes: process (default) and compose (E2E_RUNTIME=compose; a compose
 // restart keeps the container filesystem, matching the process runtime's
@@ -44,6 +43,7 @@ import (
 	vcpb "github.com/provin-line/oss/gen/go/dplaax/vc/v1"
 	"github.com/provin-line/oss/gen/go/dplaax/vc/v1/vcpbconnect"
 	natstransport "github.com/provin-line/oss/pipeline/transport/nats"
+	"github.com/provin-line/oss/vc"
 
 	"github.com/provin-line/e2e/internal/harness"
 )
@@ -86,7 +86,7 @@ func loopsBlock(selfBase string) string {
 		srcPipelineDID, selfBase)
 }
 
-func TestAuditSurvival_RestartErasesEvidenceNotIdentity(t *testing.T) {
+func TestAuditSurvival_EvidenceOutlivesRestart(t *testing.T) {
 	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "acme",
 		RegistryID:      registryID,
@@ -107,9 +107,8 @@ func TestAuditSurvival_RestartErasesEvidenceNotIdentity(t *testing.T) {
 	if _, err := didClient.ResolveDID(ctx, harness.Bearer(connect.NewRequest(&didpb.ResolveDIDRequest{Did: srcProcessDID}))); err != nil {
 		t.Fatalf("pre-restart ResolveDID(%s): %v", srcProcessDID, err)
 	}
-	// Anchor the loss claim: the evidence MUST be retrievable before the
-	// restart, or the not_found below would document a loss of a capability
-	// that never existed.
+	// Anchor the survival claim: the evidence MUST be retrievable before the
+	// restart, or the post-restart success below would prove nothing.
 	vcClient := vcpbconnect.NewVCResolverServiceClient(http.DefaultClient, e.NodeBase)
 	if _, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: head}))); err != nil {
 		t.Fatalf("pre-restart ResolveVC(%s): %v", head, err)
@@ -130,26 +129,28 @@ func TestAuditSurvival_RestartErasesEvidenceNotIdentity(t *testing.T) {
 	// keys survived, loops resubscribed, the audit machinery restarted fresh.
 	ingestAndAudit(t, e, `{"reading":43}`, float64(43))
 
-	// --- The pre-restart EVIDENCE is GONE (in-memory stores). ---
-	// This is the finding this scenario exists to pin, not a desired contract:
-	// when persistence lands, these two assertions must flip. Both pins are
-	// DEFINITIVE not_found — an absent credential and an absent audit verdict
-	// each map to CodeNotFound in the product — so an unrelated API failure
-	// (internal, unavailable, auth) fails the canary instead of satisfying it.
-	if _, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: head}))); err == nil {
-		t.Fatalf("pre-restart credential %s still resolvable — evidence persistence has landed; flip this scenario's assertions to survival", head)
-	} else if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Fatalf("post-restart ResolveVC: got %v, want not_found (definitive loss)", err)
+	// --- The pre-restart EVIDENCE SURVIVES (file-backed evidence store). ---
+	// The credential resolves to the SAME content (the store recomputes and
+	// checks the content address on read), and the audit verdict is still
+	// VERIFIED — the auditor's questions get the same answers as before.
+	resolved, err := vcClient.ResolveVC(ctx, harness.Bearer(connect.NewRequest(&vcpb.ResolveVCRequest{Hash: head})))
+	if err != nil {
+		t.Fatalf("post-restart ResolveVC(%s): evidence must survive a restart, got %v", head, err)
+	}
+	var survived vc.PipelinePassCredential
+	if err := json.Unmarshal(resolved.Msg.GetCredential(), &survived); err != nil {
+		t.Fatalf("unmarshal survived credential: %v", err)
+	}
+	if got, err := survived.Hash(); err != nil || got != head {
+		t.Fatalf("survived credential hash = %q (err %v), want %q", got, err, head)
 	}
 	auditClient := auditpbconnect.NewAuditServiceClient(http.DefaultClient, e.NodeBase)
 	st, err := auditClient.GetAuditStatus(ctx, harness.Bearer(connect.NewRequest(&auditpb.GetAuditStatusRequest{HeadHash: head})))
-	if err == nil {
-		if lc := st.Msg.GetLinearChain(); lc != nil && lc.GetConfidence() == auditpb.Confidence_CONFIDENCE_VERIFIED {
-			t.Fatalf("pre-restart audit verdict for %s survived — evidence persistence has landed; flip this scenario's assertions to survival", head)
-		}
-		t.Fatalf("post-restart GetAuditStatus returned a record (%v), want not_found (definitive loss)", st.Msg)
-	} else if connect.CodeOf(err) != connect.CodeNotFound {
-		t.Fatalf("post-restart GetAuditStatus: got %v, want not_found (definitive loss)", err)
+	if err != nil {
+		t.Fatalf("post-restart GetAuditStatus(%s): the verdict must survive a restart, got %v", head, err)
+	}
+	if lc := st.Msg.GetLinearChain(); lc == nil || lc.GetConfidence() != auditpb.Confidence_CONFIDENCE_VERIFIED {
+		t.Fatalf("post-restart audit verdict = %v, want the pre-restart VERIFIED", st.Msg)
 	}
 }
 
