@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -252,4 +253,45 @@ func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 		return lc != nil && lc.GetConfidence() == auditpb.Confidence_CONFIDENCE_VERIFIED &&
 			sc != nil && sc.GetConfidence() == auditpb.Confidence_CONFIDENCE_VERIFIED
 	})
+
+	// Consumed-set exposure (the 17q deferral, closed by the discovery
+	// slice): GetConsumedSources serves the receipt behind that
+	// source_commitment verdict — EXACTLY the folded set, paged. This is
+	// the wire surface the aggregate-complete bundle follow-up and
+	// aggregate-crossing recall build on: until it existed, the manifest
+	// payload was the only (payload-convention) substitute (finding #17).
+	wantConsumed := make([]string, 0, len(sources))
+	for _, src := range sources {
+		h, err := src.Hash()
+		if err != nil {
+			t.Fatalf("source hash: %v", err)
+		}
+		wantConsumed = append(wantConsumed, h)
+	}
+	sort.Strings(wantConsumed)
+	var gotConsumed []string
+	pageToken := ""
+	for {
+		resp, err := auditClient.GetConsumedSources(ctx, harness.Bearer(connect.NewRequest(&auditpb.GetConsumedSourcesRequest{
+			HeadHash:  head,
+			PageSize:  1, // exercise the continuation-token discipline
+			PageToken: pageToken,
+		})))
+		if err != nil {
+			t.Fatalf("GetConsumedSources: %v", err)
+		}
+		gotConsumed = append(gotConsumed, resp.Msg.GetConsumed()...)
+		pageToken = resp.Msg.GetNextPageToken()
+		if pageToken == "" {
+			break
+		}
+	}
+	if len(gotConsumed) != len(wantConsumed) {
+		t.Fatalf("consumed set = %v, want %v", gotConsumed, wantConsumed)
+	}
+	for i := range wantConsumed {
+		if gotConsumed[i] != wantConsumed[i] {
+			t.Fatalf("consumed[%d] = %s, want %s (full: %v vs %v)", i, gotConsumed[i], wantConsumed[i], gotConsumed, wantConsumed)
+		}
+	}
 }
