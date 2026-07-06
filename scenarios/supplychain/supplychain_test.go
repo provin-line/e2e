@@ -2,12 +2,12 @@
 // provenance chain in which every organization runs its own node, hosts its
 // own registry, and signs its own hop with keys that never leave its node:
 //
-//	manufacturer (registry mfg.dplaax.dev):    source loop — signs the lot
+//	manufacturer (registry mfg.poc.dplaax.dev):    source loop — signs the lot
 //	                                           record as a FirstDrop
-//	distributor  (registry dist.dplaax.dev):   chained loop — verifies the
+//	distributor  (registry dist.poc.dplaax.dev):   chained loop — verifies the
 //	                                           manufacturer's credential,
 //	                                           stamps its check, re-signs
-//	retailer     (registry retail.dplaax.dev): sink loop — verifies, audits
+//	retailer     (registry retail.poc.dplaax.dev): sink loop — verifies, audits
 //
 // Cross-organization delivery happens only through explicit NATS account
 // grants (mfg→dist on the lot subject, dist→retail on the relay subject); an
@@ -45,19 +45,19 @@ import (
 )
 
 const (
-	mfgRegistry    = "mfg.dplaax.dev"
-	distRegistry   = "dist.dplaax.dev"
-	retailRegistry = "retail.dplaax.dev"
+	mfgRegistry    = "mfg.poc.dplaax.dev"
+	distRegistry   = "dist.poc.dplaax.dev"
+	retailRegistry = "retail.poc.dplaax.dev"
 
-	mfgOwnerDID    = "did:dplaax:mfg.dplaax.dev:org:mfg"
-	lotPipelineDID = "did:dplaax:mfg.dplaax.dev:org:mfg:pipeline:lot-emissions"
-	lotProcessDID  = "did:dplaax:mfg.dplaax.dev:org:mfg:pipeline:lot-emissions:process:reporter"
+	mfgOwnerDID    = "did:dplaax:mfg.poc.dplaax.dev:org:mfg"
+	lotPipelineDID = "did:dplaax:mfg.poc.dplaax.dev:org:mfg:pipeline:lot-emissions"
+	lotProcessDID  = "did:dplaax:mfg.poc.dplaax.dev:org:mfg:pipeline:lot-emissions:process:reporter"
 
-	distOwnerDID    = "did:dplaax:dist.dplaax.dev:org:dist"
-	distPipelineDID = "did:dplaax:dist.dplaax.dev:org:dist:pipeline:lot-relay"
-	distProcessDID  = "did:dplaax:dist.dplaax.dev:org:dist:pipeline:lot-relay:process:checker"
+	distOwnerDID    = "did:dplaax:dist.poc.dplaax.dev:org:dist"
+	distPipelineDID = "did:dplaax:dist.poc.dplaax.dev:org:dist:pipeline:lot-relay"
+	distProcessDID  = "did:dplaax:dist.poc.dplaax.dev:org:dist:pipeline:lot-relay:process:checker"
 
-	retailOwnerDID = "did:dplaax:retail.dplaax.dev:org:retail"
+	retailOwnerDID = "did:dplaax:retail.poc.dplaax.dev:org:retail"
 
 	ingressSubject = "ingest.lot-emissions"
 )
