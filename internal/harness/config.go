@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -17,9 +18,13 @@ type NodeConfig struct {
 	TrustSeedFile   string
 	ResolverDir     string
 	NodeDID         string
-	ResolverBaseURL string // usually the node's own base URL (single-registry override)
-	VCStoreEndpoint string // optional; producing loops publish credentials here
-	LoopsBlock      string // contents of pipeline.loops { ... }, may be empty
+	ResolverBaseURL string // single-registry override; mutually exclusive with RegistryBaseURLs
+	// RegistryBaseURLs maps registry ids to base URLs (multi-registry
+	// topologies: each org's node hosts its own registry). Rendered as the
+	// chain.nats.registry-base-urls block with quoted keys.
+	RegistryBaseURLs map[string]string
+	VCStoreEndpoint  string // optional; producing loops publish credentials here
+	LoopsBlock       string // contents of pipeline.loops { ... }, may be empty
 
 	// SSRF-guard opt-ins. Process runtime nodes talk to loopback peers
 	// (AllowLoopback); compose runtime nodes talk over the container network's
@@ -53,15 +58,27 @@ func (c NodeConfig) Render() string {
       resolver-dir         = %q
       node-did             = %q
       resolver-base-url    = %q
-    }
-  }
-  pipeline {
 `, c.ListenAddr, c.AllowLoopback, c.AllowPrivateNetworks, c.PDPBaseURL, c.RegistryID,
 		c.NATSURL, c.AccountSeedFile, c.TrustSeedFile, c.ResolverDir, c.NodeDID, c.ResolverBaseURL)
+	if len(c.RegistryBaseURLs) > 0 {
+		b.WriteString("      registry-base-urls {\n")
+		regs := make([]string, 0, len(c.RegistryBaseURLs))
+		for reg := range c.RegistryBaseURLs {
+			regs = append(regs, reg)
+		}
+		sort.Strings(regs)
+		for _, reg := range regs {
+			fmt.Fprintf(&b, "        %q = %q\n", reg, c.RegistryBaseURLs[reg])
+		}
+		b.WriteString("      }\n")
+	}
+	b.WriteString("    }\n  }\n  pipeline {\n")
 	if c.VCStoreEndpoint != "" {
 		fmt.Fprintf(&b, "    vc-store-endpoint = %q\n", c.VCStoreEndpoint)
-		fmt.Fprintf(&b, "    vc-store-bearer   = %q\n", BearerToken)
 	}
+	// Always present: the batch resolver reuses this token for peer predecessor
+	// fetches, which a consuming-only node (no endpoint) still performs.
+	fmt.Fprintf(&b, "    vc-store-bearer   = %q\n", BearerToken)
 	if c.LoopsBlock != "" {
 		fmt.Fprintf(&b, "    loops {\n%s\n    }\n", c.LoopsBlock)
 	}
