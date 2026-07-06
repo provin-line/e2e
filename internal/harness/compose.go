@@ -98,8 +98,8 @@ func ProvisionCompose(t *testing.T, dir string, accountNames ...string) *Compose
 		if err != nil {
 			t.Fatalf("compose: natsop.New(%s): %v", name, err)
 		}
-		if _, err := aop.AddExport("chain.bootstrap." + name); err != nil {
-			t.Fatalf("compose: bootstrap export %s: %v", name, err)
+		if err := aop.PublishClaims(); err != nil {
+			t.Fatalf("compose: publish claims %s: %v", name, err)
 		}
 		p.accounts[name] = &NATSAccount{Name: name, SeedFile: seedFile, Seed: string(accSeed), Pub: accPub, Op: aop}
 	}

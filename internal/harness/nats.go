@@ -92,10 +92,10 @@ func StartNATS(t *testing.T, dir string, accountNames ...string) *NATS {
 		if err != nil {
 			t.Fatalf("nats: natsop.New(%s): %v", name, err)
 		}
-		// Account JWTs are written only on a mutation; a bootstrap export makes
-		// the bare account connectable before any real grant exists.
-		if _, err := aop.AddExport("chain.bootstrap." + name); err != nil {
-			t.Fatalf("nats: bootstrap export %s: %v", name, err)
+		// Publish the bare account's claims so it is connectable before any
+		// grant exists (oss finding #14 fix).
+		if err := aop.PublishClaims(); err != nil {
+			t.Fatalf("nats: publish claims %s: %v", name, err)
 		}
 		n.accounts[name] = &NATSAccount{Name: name, SeedFile: seedFile, Seed: string(accSeed), Pub: accPub, Op: aop}
 	}
