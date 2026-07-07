@@ -38,6 +38,18 @@ type NodeConfig struct {
 }
 
 // Render produces the application.conf text.
+// serviceEndpointsBlock advertises the node's VC-resolver service in every
+// DID document it issues — the normative endpoint derivation the batch
+// resolver and the aggregate-complete bundle exporter both follow. A node
+// that publishes credentials (VCStoreEndpoint set) advertises where they
+// resolve; a node without one advertises nothing.
+func (c NodeConfig) serviceEndpointsBlock() string {
+	if c.VCStoreEndpoint == "" {
+		return ""
+	}
+	return fmt.Sprintf("    service-endpoints {\n      vc-resolver { type = \"VCResolver\", url = %q }\n    }\n", c.VCStoreEndpoint)
+}
+
 func (c NodeConfig) Render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `provin.network {
@@ -48,7 +60,9 @@ func (c NodeConfig) Render() string {
     allow-private-networks = %v
   }
   auth.policy-verifier-url = %q
-  registry { id = %q }
+  registry {
+    id = %q
+%s  }
   chain {
     transport = "nats"
     nats {
@@ -59,6 +73,7 @@ func (c NodeConfig) Render() string {
       node-did             = %q
       resolver-base-url    = %q
 `, c.ListenAddr, c.AllowLoopback, c.AllowPrivateNetworks, c.PDPBaseURL, c.RegistryID,
+		c.serviceEndpointsBlock(),
 		c.NATSURL, c.AccountSeedFile, c.TrustSeedFile, c.ResolverDir, c.NodeDID, c.ResolverBaseURL)
 	if len(c.RegistryBaseURLs) > 0 {
 		b.WriteString("      registry-base-urls {\n")
