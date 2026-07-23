@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/provin-line/oss/crypto"
 	"github.com/provin-line/oss/crypto/ed25519"
@@ -175,6 +176,29 @@ func writeConfigFile(dir, cfg string) (string, error) {
 	return path, nil
 }
 
+// wireauthEpochSettle upper-bounds network/pkg/services/chainmanager/wireauth's
+// own restart-epoch anti-replay barrier (verify.go: epoch defaults to
+// ceilToSecond(verifier-construction-time + MaxFuture), MaxFuture defaults to
+// 5s) — a HARD-CODED, unconfigurable window with no HOCON knob. ANY
+// wireauth-signed call (cmd/pipeline's RegisterAuditHead/RetainPayload/
+// ResolvePayload/MirrorLogSegment — every wire call it makes to cmd/network)
+// issued before that epoch is rejected ErrBeforeEpoch, and cmd/pipeline's own
+// transport layer does NOT retry a rejected emit — it logs "emit failed —
+// dropping" and moves on, so a stimulus racing this window is lost forever,
+// not merely delayed. cmd/standalone never hits this: its own internal
+// audit/payload calls go through an in-process adapter (auditRegistrarAdapter,
+// cmd/standalone/runtimewiring.go), never wireauth's wire path — this is a
+// separated-topology-only timing floor A2 surfaces for the first time (a
+// product-level finding: a fresh network+pipeline pair's first real emission
+// can race its own boot epoch with no recovery — worth a follow-up in the
+// product, not just the harness). Measured empirically at 2s past the 5s
+// default (network's verifier construction trails its own process-spawn
+// instant by up to ~1s, then ceilToSecond rounds up again) — 8s from
+// network's readyz PASSING (not process spawn: readyz cannot be healthy
+// before the RPC surface using this verifier is wired, so it is a tighter,
+// more reliable anchor than spawn time) leaves a comfortable margin.
+const wireauthEpochSettle = 8 * time.Second
+
 // StartSeparatedNode boots the production separated topology as two real
 // processes: cmd/network first (its config via the same application.conf
 // convention StartNode uses), waited healthy on ITS OWN /readyz, then
@@ -184,7 +208,9 @@ func writeConfigFile(dir, cfg string) (string, error) {
 // evidence store (+ PDP when external), pipeline's checks NATS + registry
 // reachability (+ PDP when a push-ingress loop is configured) — so a scenario
 // stimulating either process is guaranteed its dependencies are actually
-// live, not merely that the HTTP listener accepted a connection.
+// live, not merely that the HTTP listener accepted a connection. It ALSO
+// blocks until network's own wireauth restart epoch has cleared
+// (wireauthEpochSettle) — readyz alone does not cover this (see its doc).
 func StartSeparatedNode(t *testing.T, spec SeparatedNodeSpec) *SeparatedNode {
 	t.Helper()
 
@@ -194,6 +220,7 @@ func StartSeparatedNode(t *testing.T, spec SeparatedNodeSpec) *SeparatedNode {
 	}
 	network := runNodeProcess(t, spec.Name+"-network", spec.NetworkBin, spec.NetworkDir, networkBaseURL, nil)
 	waitHealthy(t, network.Name, network.BaseURL+"/readyz", network)
+	networkReady := time.Now()
 
 	pipelineBaseURL := "http://127.0.0.1" + spec.PipelineListenAddr
 	confPath, err := writeConfigFile(spec.PipelineDir, spec.PipelineConfig)
@@ -202,6 +229,12 @@ func StartSeparatedNode(t *testing.T, spec SeparatedNodeSpec) *SeparatedNode {
 	}
 	pipeline := runNodeProcess(t, spec.Name+"-pipeline", spec.PipelineBin, spec.PipelineDir, pipelineBaseURL, []string{"CONFIG_FILE=" + confPath})
 	waitHealthy(t, pipeline.Name, pipeline.BaseURL+"/readyz", pipeline)
+
+	// wireauthEpochSettle: block until network's own wireauth restart epoch
+	// has cleared — see its doc for why readyz does not already cover this.
+	if remaining := wireauthEpochSettle - time.Since(networkReady); remaining > 0 {
+		time.Sleep(remaining)
+	}
 
 	return &SeparatedNode{
 		Name:     spec.Name,

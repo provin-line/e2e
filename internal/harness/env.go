@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,12 +32,34 @@ type SingleNodeEnv struct {
 }
 
 // SingleNodeSpec describes a one-node scenario topology: one NATS account, one
-// standalone node running the given loops. Account doubles as the compose
-// service name and the seed-file prefix.
+// owner, and the Pipeline/Process DIDs its loops sign as. Account doubles as
+// the compose service name and the seed-file prefix; combined with
+// RegistryID it also derives the owner DID StartSingleNode registers
+// ("did:dplaax:{RegistryID}:org:{Account}", the same shape every scenario's
+// own ownerDID constant already used before this field existed).
 type SingleNodeSpec struct {
 	Account    string
 	RegistryID string
-	NodeDID    string
+	// NodeDID is the chain.nats.node-did value — the identity cmd/pipeline's
+	// own wireauth-signed calls sign as (RegisterAuditHead, ResolvePayload;
+	// wiring.go's preflightWireOnlySignerKeys). In the separated (process)
+	// runtime it MUST be one of PipelineDIDs/ProcessDIDs below — the owner DID
+	// (this field's pre-A2 convention) has no #auth verification method
+	// (RegisterOwner's document carries only #signing) and so can never
+	// resolve for wireauth; StartSingleNode's process branch fails fast if
+	// this invariant is violated. The compose (all-in-one) runtime has no wire
+	// boundary to cross here and tolerates either.
+	NodeDID string
+	// PipelineDIDs / ProcessDIDs are every Pipeline/Process DID the scenario's
+	// loops sign as (issuer.did in Loops' rendered config, and any DID used as
+	// a producing loop's output-subject). StartSingleNode issues each one
+	// under the derived owner before returning — mint mode (server-side keys)
+	// on the compose runtime, the external-key path (ProvisionExternalIdentity
+	// + BootstrapExternal) on the process runtime, where the minted key must
+	// live in cmd/pipeline's OWN data dir, not the registry's (D9 keystore
+	// locality — ProvisionPipelineKey's doc).
+	PipelineDIDs []string
+	ProcessDIDs  []string
 	// Loops renders the pipeline.loops body; selfBase is the node's own
 	// control-plane base URL AS THE NODE REACHES IT (loopback in process mode,
 	// the compose service name in compose mode).
@@ -49,6 +72,14 @@ type SingleNodeSpec struct {
 	// be published before the node's loops subscribed (plain-subject publishes
 	// with no subscriber are lost).
 	IngressSubjects []string
+}
+
+// ownerDIDFor derives a SingleNodeSpec's owner DID from RegistryID + Account —
+// the "did:dplaax:{registry}:org:{account}" shape every scenario's own
+// ownerDID constant already followed before StartSingleNode absorbed
+// Bootstrap.
+func ownerDIDFor(spec SingleNodeSpec) string {
+	return fmt.Sprintf("did:dplaax:%s:org:%s", spec.RegistryID, spec.Account)
 }
 
 // FastTunables are the node-level intervals scenarios use so async machinery
@@ -66,56 +97,100 @@ func StartSingleNode(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 	return startSingleNodeProcess(t, spec)
 }
 
+// startSingleNodeProcess is the separated topology's process-mode twin (A2):
+// cmd/network (control plane) + cmd/pipeline (data plane) as two real
+// subprocesses, replacing the retiring all-in-one cmd/standalone binary this
+// function used to start. Bootstrap now happens HERE, not in scenario code —
+// the external-key path needs the pipeline's own data dir (to provision
+// local keys BEFORE cmd/pipeline boots, D9 keystore locality), which no
+// scenario-level Bootstrap call had access to.
 func startSingleNodeProcess(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 	t.Helper()
-	bin := BuildStandalone(t)
-	listenAddr := FreePort(t)
+	networkBin, pipelineBin := BuildBinaries(t)
+	networkListen, pipelineListen := FreePort(t), FreePort(t)
 	pdpURL := StartPDPStub(t, FreePort(t))
 
 	workDir := t.TempDir()
 	broker := StartNATS(t, filepath.Join(workDir, "nats"), spec.Account)
 	acct := broker.Account(t, spec.Account)
 
-	baseURL := "http://127.0.0.1" + listenAddr
-	cfg := NodeConfig{
-		AllowLoopback:   true,
-		ListenAddr:      listenAddr,
-		RegistryID:      spec.RegistryID,
-		PDPBaseURL:      pdpURL,
-		NATSURL:         broker.URL,
-		AccountSeedFile: acct.SeedFile,
-		TrustSeedFile:   broker.TrustSeedFile,
-		ResolverDir:     broker.ResolverDir,
-		NodeDID:         spec.NodeDID,
-		ResolverBaseURL: baseURL,
-		VCStoreEndpoint: baseURL,
-		LoopsBlock:      spec.Loops(baseURL),
-		Extra:           spec.Tunables,
+	networkBaseURL := "http://127.0.0.1" + networkListen
+	networkDir := filepath.Join(workDir, spec.Account+"-network")
+	pipelineDir := filepath.Join(workDir, spec.Account+"-pipeline")
+	pipelineDataDir := filepath.Join(pipelineDir, "data")
+
+	// Local key provisioning before cmd/pipeline ever boots: its own D9/
+	// wire-only-signer preflights fail closed at boot if a configured
+	// identity's local key is missing (ProvisionExternalIdentity's doc).
+	extKeys := make(map[string]ExternalKeys, len(spec.PipelineDIDs)+len(spec.ProcessDIDs))
+	for _, d := range spec.PipelineDIDs {
+		extKeys[d] = ProvisionExternalIdentity(t, pipelineDataDir, d)
+	}
+	for _, d := range spec.ProcessDIDs {
+		extKeys[d] = ProvisionExternalIdentity(t, pipelineDataDir, d)
+	}
+	if _, ok := extKeys[spec.NodeDID]; !ok {
+		t.Fatalf("SingleNodeSpec %s: NodeDID %s must be one of PipelineDIDs/ProcessDIDs in the process (separated) runtime — it is the identity cmd/pipeline's own wireauth-signed calls (RegisterAuditHead, ResolvePayload) sign as, and only those two lists get provisioned", spec.Account, spec.NodeDID)
 	}
 
-	nodeDir := filepath.Join(workDir, spec.Account+"-node")
-	if err := os.MkdirAll(nodeDir, 0o755); err != nil {
-		t.Fatal(err)
+	networkCfg, pipelineCfg := SplitNodeConfig(SeparatedConfig{
+		NetworkListenAddr:  networkListen,
+		PipelineListenAddr: pipelineListen,
+		RegistryID:         spec.RegistryID,
+		PDPBaseURL:         pdpURL,
+		NATSURL:            broker.URL,
+		AccountSeedFile:    acct.SeedFile,
+		TrustSeedFile:      broker.TrustSeedFile,
+		ResolverDir:        broker.ResolverDir,
+		NodeDID:            spec.NodeDID,
+		ResolverBaseURL:    networkBaseURL,
+		AllowLoopback:      true,
+		LoopsBlock:         spec.Loops(networkBaseURL),
+		Tunables:           spec.Tunables,
+	})
+
+	startBoth := func() *SeparatedNode {
+		return StartSeparatedNode(t, SeparatedNodeSpec{
+			Name: spec.Account,
+
+			NetworkBin:        networkBin,
+			NetworkListenAddr: networkListen,
+			NetworkDir:        networkDir,
+			NetworkConfig:     networkCfg,
+
+			PipelineBin:        pipelineBin,
+			PipelineListenAddr: pipelineListen,
+			PipelineDir:        pipelineDir,
+			PipelineConfig:     pipelineCfg,
+		})
 	}
-	node := StartNode(t, spec.Account, bin, nodeDir, listenAddr, cfg.Render())
+	sn := startBoth()
 	waitSubscribed := func() {
 		for _, subj := range spec.IngressSubjects {
 			broker.WaitForSubscriber(t, subj, 30*time.Second)
 		}
 	}
 	waitSubscribed()
+
+	// Wire bootstrap AFTER both processes are healthy: neither preflight
+	// needs a resolvable DID document to boot, only the local keys above —
+	// so registering them now (rather than before StartSeparatedNode) needs
+	// no boot-order change from Bootstrap's own all-in-one convention.
+	owner := NewOwner(t, ownerDIDFor(spec))
+	BootstrapExternal(t, sn.BaseURL, owner, spec.PipelineDIDs, spec.ProcessDIDs, extKeys)
+
 	return SingleNodeEnv{
-		NodeBase:  node.BaseURL,
+		NodeBase:  sn.BaseURL,
 		NATSURL:   broker.URL,
 		AcctSeed:  acct.Seed,
-		SinkLines: func() []string { return node.SinkLines() },
+		SinkLines: func() []string { return sn.SinkLines() },
 		RestartNode: func() string {
-			node.Stop(t)
-			node = StartNode(t, spec.Account, bin, nodeDir, listenAddr, cfg.Render())
+			sn.Stop(t)
+			sn = startBoth()
 			waitSubscribed()
-			return node.BaseURL // the process runtime rebinds the same port
+			return sn.BaseURL // the process runtime rebinds the same ports
 		},
-		StopNode: func() { node.Stop(t) },
+		StopNode: func() { sn.Stop(t) },
 	}
 }
 
@@ -159,6 +234,14 @@ func startSingleNodeCompose(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 	for _, subj := range spec.IngressSubjects {
 		WaitForSubscriberHTTP(t, "http://"+natsMon, subj, 60*time.Second)
 	}
+
+	// Wire bootstrap: mint mode, unchanged — the compose runtime is still the
+	// all-in-one topology (A2 migrates the process runtime only; the compose
+	// twin's own migration is a recorded follow-up, AGENTS.md rule 3), so the
+	// registry-generated key lands in the SAME container/data-dir the node
+	// reads from, same as it always has.
+	owner := NewOwner(t, ownerDIDFor(spec))
+	Bootstrap(t, nodeBase, owner, spec.PipelineDIDs, spec.ProcessDIDs)
 
 	seed, err := os.ReadFile(filepath.Join(testdata, spec.Account+"-account.seed"))
 	if err != nil {
