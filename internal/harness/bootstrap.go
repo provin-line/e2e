@@ -98,53 +98,6 @@ func (o *Owner) signedOwnerDoc(t *testing.T) []byte {
 	return raw
 }
 
-// Bootstrap registers the owner and issues every pipeline and process DID a
-// scenario's loops sign as, all over the node's ConnectRPC surface. The
-// registry generates and holds the pipeline/process signing keys (KMS model);
-// the client never sees a private key besides the owner's.
-func Bootstrap(t *testing.T, nodeBaseURL string, owner *Owner, pipelineDIDs []string, processDIDs []string) {
-	t.Helper()
-	ctx := context.Background()
-	client := didpbconnect.NewDIDServiceClient(http.DefaultClient, nodeBaseURL)
-
-	if _, err := client.RegisterOwner(ctx, Bearer(connect.NewRequest(&didpb.RegisterOwnerRequest{
-		DidDocument: owner.signedOwnerDoc(t),
-	}))); err != nil {
-		t.Fatalf("RegisterOwner(%s): %v (code %v)", owner.DID, err, connect.CodeOf(err))
-	}
-
-	for _, p := range pipelineDIDs {
-		dlg, err := delegation.Build(owner.Signer, owner.DID, delegation.DelegationSubject{ID: p, DelegatedBy: owner.DID})
-		if err != nil {
-			t.Fatalf("delegation.Build(%s): %v", p, err)
-		}
-		dlgBytes, err := json.Marshal(dlg)
-		if err != nil {
-			t.Fatalf("marshal delegation: %v", err)
-		}
-		if _, err := client.IssuePipeline(ctx, Bearer(connect.NewRequest(&didpb.IssuePipelineRequest{
-			TargetDid: p, Delegation: dlgBytes,
-		}))); err != nil {
-			t.Fatalf("IssuePipeline(%s): %v (code %v)", p, err, connect.CodeOf(err))
-		}
-	}
-	for _, p := range processDIDs {
-		dlg, err := delegation.Build(owner.Signer, owner.DID, delegation.DelegationSubject{ID: p, DelegatedBy: owner.DID})
-		if err != nil {
-			t.Fatalf("delegation.Build(%s): %v", p, err)
-		}
-		dlgBytes, err := json.Marshal(dlg)
-		if err != nil {
-			t.Fatalf("marshal delegation: %v", err)
-		}
-		if _, err := client.IssueProcess(ctx, Bearer(connect.NewRequest(&didpb.IssueProcessRequest{
-			TargetDid: p, Delegation: dlgBytes,
-		}))); err != nil {
-			t.Fatalf("IssueProcess(%s): %v (code %v)", p, err, connect.CodeOf(err))
-		}
-	}
-}
-
 // BootstrapExternal is Bootstrap's external-key twin for the separated
 // topology: it registers the owner exactly as Bootstrap does, then issues
 // every pipeline and process DID over IssuePipeline/IssueProcess's
