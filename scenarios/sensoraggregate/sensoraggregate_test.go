@@ -122,17 +122,13 @@ func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "plant",
 		RegistryID:      registryID,
-		NodeDID:         ownerDID,
+		NodeDID:         aggProcess,
+		PipelineDIDs:    []string{sensorAPipeline, sensorBPipeline, aggPipeline},
+		ProcessDIDs:     []string{sensorAProcess, sensorBProcess, aggProcess},
 		Loops:           loopsBlock,
 		Tunables:        harness.FastTunables,
 		IngressSubjects: []string{"ingest.sensor-a", "ingest.sensor-b"},
 	})
-
-	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.NodeBase, owner,
-		[]string{sensorAPipeline, sensorBPipeline, aggPipeline},
-		[]string{sensorAProcess, sensorBProcess, aggProcess},
-	)
 
 	conn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
