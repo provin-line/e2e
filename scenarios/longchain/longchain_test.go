@@ -36,23 +36,38 @@ import (
 
 const (
 	registryID = "poc.dplaax.dev"
-	ownerDID   = "did:dplaax:poc.dplaax.dev:org:acme"
 	orgBase    = "did:dplaax:poc.dplaax.dev:org:acme:pipeline:"
 
 	hops           = 10
 	ingressSubject = "ingest.deep"
+
+	srcPipelineDID = orgBase + "deep"
+	srcProcessDID  = srcPipelineDID + ":process:s1"
 )
 
 func hopPipelineDID(i int) string { return fmt.Sprintf("%shop%02d", orgBase, i) }
 func hopProcessDID(i int) string  { return hopPipelineDID(i) + fmt.Sprintf(":process:p%02d", i) }
 
+// chainDIDs computes every Pipeline/Process DID the chain's loops sign as —
+// src plus hop01..hopN — independent of rendering the loops HOCON block, so
+// StartSingleNode can provision/issue them before Loops is ever called (it
+// needs the full DID list before it can render config, since key
+// provisioning must precede cmd/pipeline's boot).
+func chainDIDs() (pipelines, processes []string) {
+	pipelines = append(pipelines, srcPipelineDID)
+	processes = append(processes, srcProcessDID)
+	for i := 1; i <= hops; i++ {
+		pipelines = append(pipelines, hopPipelineDID(i))
+		processes = append(processes, hopProcessDID(i))
+	}
+	return pipelines, processes
+}
+
 // loopsBlock renders src → hop01..hopN → sink. Hop i consumes hop(i-1)'s
 // subject (hop 1 consumes the source pipeline) and stamps {'hop': i}.
-func loopsBlock(selfBase string) (block string, pipelines, processes []string) {
-	srcPipeline := orgBase + "deep"
-	srcProcess := srcPipeline + ":process:s1"
-	pipelines = append(pipelines, srcPipeline)
-	processes = append(processes, srcProcess)
+func loopsBlock(selfBase string) string {
+	srcPipeline := srcPipelineDID
+	srcProcess := srcProcessDID
 
 	var b strings.Builder
 	fmt.Fprintf(&b, `
@@ -73,8 +88,6 @@ func loopsBlock(selfBase string) (block string, pipelines, processes []string) {
 	prevSubject := srcPipeline
 	for i := 1; i <= hops; i++ {
 		p, proc := hopPipelineDID(i), hopProcessDID(i)
-		pipelines = append(pipelines, p)
-		processes = append(processes, proc)
 		fmt.Fprintf(&b, `
       hop%02d {
         role            = "chained"
@@ -107,28 +120,22 @@ func loopsBlock(selfBase string) (block string, pipelines, processes []string) {
           upstream-endpoint     = %q
         }
       }`, prevSubject, selfBase)
-	return b.String(), pipelines, processes
+	return b.String()
 }
 
 func TestLongChain_DeepAuditAndWireTraversal(t *testing.T) {
 	ctx := context.Background()
-	var pipelines, processes []string
-	loops := func(selfBase string) string {
-		var block string
-		block, pipelines, processes = loopsBlock(selfBase)
-		return block
-	}
+	pipelines, processes := chainDIDs()
 	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "acme",
 		RegistryID:      registryID,
-		NodeDID:         ownerDID,
-		Loops:           loops,
+		NodeDID:         srcProcessDID,
+		PipelineDIDs:    pipelines,
+		ProcessDIDs:     processes,
+		Loops:           loopsBlock,
 		Tunables:        harness.FastTunables,
 		IngressSubjects: []string{ingressSubject},
 	})
-
-	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.NodeBase, owner, pipelines, processes)
 
 	conn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
