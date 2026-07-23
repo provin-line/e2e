@@ -84,7 +84,32 @@ type SeparatedConfig struct {
 // its own "./data" on disk despite the identical relative path both configs
 // render.
 func SplitNodeConfig(c SeparatedConfig) (networkCfg, pipelineCfg string) {
-	networkBaseURL := "http://127.0.0.1" + c.NetworkListenAddr
+	// networkBaseURL is the network process's own base URL AS A PEER REACHES
+	// IT — cmd/pipeline dials it as a wire client (vc-store-endpoint), and
+	// network's own service-endpoints block advertises the identical value in
+	// every DID document it issues for a cross-org peer to resolve. That
+	// "self, as reached from outside this process" value is exactly what
+	// every caller already computes for ResolverBaseURL (single-registry) or
+	// RegistryBaseURLs[RegistryID] (multi-registry, self-keyed) — loopback+
+	// own-port on the process runtime, the compose service's own DNS name on
+	// the compose runtime (e.g. http://acme-network:8443, never resolvable
+	// from NetworkListenAddr alone once every compose node shares the same
+	// host-less ":8443"). Deriving it independently from NetworkListenAddr
+	// used to coincide with ResolverBaseURL by accident on the process
+	// runtime (both reduce to "http://127.0.0.1"+port) but silently diverged
+	// on compose, where NetworkListenAddr carries no service identity —
+	// cmd/pipeline booted with the host-view loopback URL and every wire call
+	// tripped the SSRF guard's loopback block.
+	networkBaseURL := c.ResolverBaseURL
+	if networkBaseURL == "" {
+		networkBaseURL = c.RegistryBaseURLs[c.RegistryID]
+	}
+	if networkBaseURL == "" {
+		// No current caller hits this (every SeparatedConfig sets one of the
+		// two above), but fall back to the process-runtime-safe loopback
+		// derivation rather than emitting an empty vc-store-endpoint.
+		networkBaseURL = "http://127.0.0.1" + c.NetworkListenAddr
+	}
 
 	base := NodeConfig{
 		AllowLoopback:        c.AllowLoopback,
