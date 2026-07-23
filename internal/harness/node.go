@@ -57,6 +57,56 @@ var (
 	buildErr  error
 )
 
+// BuildBinaries compiles cmd/network (control plane) and cmd/pipeline (data
+// plane) from the cloned oss repo once per test binary and returns both
+// executable paths — the separated topology's twin of BuildStandalone, same
+// once-per-package sync.Once and output-keying discipline (the output paths
+// are keyed by the test binary's name so parallel scenario packages cannot
+// clobber each other's in-progress `go build`).
+func BuildBinaries(t *testing.T) (networkBin, pipelineBin string) {
+	t.Helper()
+	buildBinariesOnce.Do(func() {
+		root := repoRoot(t)
+		ossDir := filepath.Join(root, "repos", "oss")
+		suffix := filepath.Base(os.Args[0])
+		netOut := filepath.Join(root, ".tmp", "network-"+suffix)
+		pipeOut := filepath.Join(root, ".tmp", "pipeline-"+suffix)
+		if err := os.MkdirAll(filepath.Dir(netOut), 0o755); err != nil {
+			buildBinariesErr = err
+			return
+		}
+		build := func(out, pkg string) error {
+			cmd := exec.Command("go", "build", "-o", out, pkg)
+			cmd.Dir = ossDir
+			cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+			if b, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("go build %s: %v\n%s", pkg, err, b)
+			}
+			return nil
+		}
+		if err := build(netOut, "./cmd/network"); err != nil {
+			buildBinariesErr = err
+			return
+		}
+		if err := build(pipeOut, "./cmd/pipeline"); err != nil {
+			buildBinariesErr = err
+			return
+		}
+		networkBinPath, pipelineBinPath = netOut, pipeOut
+	})
+	if buildBinariesErr != nil {
+		t.Fatalf("BuildBinaries: %v", buildBinariesErr)
+	}
+	return networkBinPath, pipelineBinPath
+}
+
+var (
+	buildBinariesOnce sync.Once
+	networkBinPath    string
+	pipelineBinPath   string
+	buildBinariesErr  error
+)
+
 // repoRoot walks up from the CWD to the directory containing go.mod (the e2e
 // repo root), so tests work regardless of which package directory runs them.
 func repoRoot(t *testing.T) string {
@@ -133,6 +183,40 @@ func StartNode(t *testing.T, name, bin, dir, listenAddr, cfg string) *Node {
 	t.Cleanup(func() { n.Stop(t) })
 
 	waitHealthy(t, name, n.BaseURL+"/healthz", n)
+	return n
+}
+
+// runNodeProcess execs bin with dir as its working directory and extraEnv
+// appended to the environment, wiring stdout/stderr into a Node and
+// registering Stop as t.Cleanup. It writes no config and waits for no
+// readiness signal — callers do both. StartNode inlines this same shape for
+// its own single case (config at <dir>/config/application.conf, wait on
+// /healthz); this lower-level helper exists for StartSeparatedNode, whose two
+// processes take config through different mechanisms (application.conf vs
+// CONFIG_FILE) and become ready on different criteria (each process's OWN
+// /readyz, not /healthz — see separated.go).
+func runNodeProcess(t *testing.T, name, bin, dir, baseURL string, extraEnv []string) *Node {
+	t.Helper()
+	n := &Node{
+		Name:    name,
+		Dir:     dir,
+		BaseURL: baseURL,
+		stdout:  &LogBuffer{},
+		stderr:  &LogBuffer{},
+	}
+	n.cmd = exec.Command(bin)
+	n.cmd.Dir = dir
+	if len(extraEnv) > 0 {
+		n.cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	n.cmd.Stdout = n.stdout
+	n.cmd.Stderr = n.stderr
+	if err := n.cmd.Start(); err != nil {
+		t.Fatalf("node %s: start: %v", name, err)
+	}
+	n.done = make(chan struct{})
+	go func() { _ = n.cmd.Wait(); close(n.done) }() // cmd.Wait flushes the stdout/stderr copiers
+	t.Cleanup(func() { n.Stop(t) })
 	return n
 }
 
