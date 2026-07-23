@@ -1,6 +1,7 @@
 // Package harness runs real provin binaries and infrastructure for e2e
-// scenarios: building cmd/standalone from repos/oss, running node processes
-// with generated config, an embedded real NATS server, and an allow-all PDP.
+// scenarios: building cmd/network + cmd/pipeline (the separated topology;
+// see separated.go) from repos/oss, running node processes with generated
+// config, an embedded real NATS server, and an allow-all PDP.
 //
 // The node is strictly black-box: the harness touches it only through config
 // files, environment, TCP ports, and stdout.
@@ -20,41 +21,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-)
-
-// BuildStandalone compiles cmd/standalone from the cloned oss repo once per
-// test binary and returns the executable path. The output path is keyed by the
-// test binary's name: scenario packages run in parallel, and a shared output
-// path would let one package's `go build` clobber the binary another package's
-// node is currently executing.
-func BuildStandalone(t *testing.T) string {
-	t.Helper()
-	buildOnce.Do(func() {
-		root := repoRoot(t)
-		out := filepath.Join(root, ".tmp", "standalone-"+filepath.Base(os.Args[0]))
-		if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
-			buildErr = err
-			return
-		}
-		cmd := exec.Command("go", "build", "-o", out, "./cmd/standalone")
-		cmd.Dir = filepath.Join(root, "repos", "oss")
-		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
-		if b, err := cmd.CombinedOutput(); err != nil {
-			buildErr = fmt.Errorf("go build cmd/standalone: %v\n%s", err, b)
-			return
-		}
-		builtPath = out
-	})
-	if buildErr != nil {
-		t.Fatalf("BuildStandalone: %v", buildErr)
-	}
-	return builtPath
-}
-
-var (
-	buildOnce sync.Once
-	builtPath string
-	buildErr  error
 )
 
 // BuildBinaries compiles cmd/network (control plane) and cmd/pipeline (data
@@ -153,48 +119,13 @@ func FreePort(t *testing.T) string {
 	return fmt.Sprintf(":%d", addr.Port)
 }
 
-// StartNode writes cfg to <dir>/config/application.conf and starts the
-// standalone binary with dir as its working directory. It waits for /healthz.
-func StartNode(t *testing.T, name, bin, dir, listenAddr, cfg string) *Node {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o755); err != nil {
-		t.Fatalf("node %s: mkdir config: %v", name, err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "config", "application.conf"), []byte(cfg), 0o644); err != nil {
-		t.Fatalf("node %s: write config: %v", name, err)
-	}
-
-	n := &Node{
-		Name:    name,
-		Dir:     dir,
-		BaseURL: "http://127.0.0.1" + listenAddr,
-		stdout:  &LogBuffer{},
-		stderr:  &LogBuffer{},
-	}
-	n.cmd = exec.Command(bin)
-	n.cmd.Dir = dir
-	n.cmd.Stdout = n.stdout
-	n.cmd.Stderr = n.stderr
-	if err := n.cmd.Start(); err != nil {
-		t.Fatalf("node %s: start: %v", name, err)
-	}
-	n.done = make(chan struct{})
-	go func() { _ = n.cmd.Wait(); close(n.done) }() // cmd.Wait flushes the stdout/stderr copiers
-	t.Cleanup(func() { n.Stop(t) })
-
-	waitHealthy(t, name, n.BaseURL+"/healthz", n)
-	return n
-}
-
 // runNodeProcess execs bin with dir as its working directory and extraEnv
 // appended to the environment, wiring stdout/stderr into a Node and
 // registering Stop as t.Cleanup. It writes no config and waits for no
-// readiness signal — callers do both. StartNode inlines this same shape for
-// its own single case (config at <dir>/config/application.conf, wait on
-// /healthz); this lower-level helper exists for StartSeparatedNode, whose two
-// processes take config through different mechanisms (application.conf vs
-// CONFIG_FILE) and become ready on different criteria (each process's OWN
-// /readyz, not /healthz — see separated.go).
+// readiness signal — callers do both. This lower-level helper exists for
+// StartSeparatedNode, whose two processes take config through different
+// mechanisms (application.conf vs CONFIG_FILE) and become ready on different
+// criteria (each process's OWN /readyz, not /healthz — see separated.go).
 func runNodeProcess(t *testing.T, name, bin, dir, baseURL string, extraEnv []string) *Node {
 	t.Helper()
 	n := &Node{

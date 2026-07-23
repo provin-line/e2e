@@ -1,12 +1,15 @@
 // Separated-topology support: cmd/network (control plane, LTL) + cmd/pipeline
 // (data plane, STL) run as two independent processes talking only over the
-// wire — the production deployment shape cmd/standalone (all-in-one) is being
-// retired in favor of. This file gives scenarios the same black-box surface
-// StartNode/NodeConfig give the all-in-one topology: a config-split helper, a
-// two-process starter that waits each side healthy on ITS OWN /readyz, and an
-// out-of-band local-key provisioning helper for cmd/pipeline's own boot
-// preflights (see ProvisionPipelineKey's doc for why this is NOT a full
-// identity-provisioning story yet).
+// wire — the production deployment shape the all-in-one cmd/standalone binary
+// has been retired in favor of on the process runtime (A2; the compose
+// runtime's own migration is a recorded follow-up). This file gives scenarios
+// the same black-box surface the retired StartNode/NodeConfig gave the
+// all-in-one topology: a config-split helper, a two-process starter that
+// waits each side healthy on ITS OWN /readyz, and an out-of-band local-key
+// provisioning helper for cmd/pipeline's own boot preflights (see
+// ProvisionPipelineKey's doc for why this is NOT a full identity-provisioning
+// story on its own — ProvisionExternalIdentity + BootstrapExternal, below and
+// in bootstrap.go, complete it).
 package harness
 
 import (
