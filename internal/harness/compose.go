@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -154,16 +155,53 @@ func (p *ComposeProvision) WriteBrokerConfig(t *testing.T) {
 	}
 }
 
-// WriteNodeConfig renders a node's application.conf under
-// dir/<node>/config/application.conf for the compose volume mount.
-func (p *ComposeProvision) WriteNodeConfig(t *testing.T, node string, cfg NodeConfig) {
+// WriteNodeConfig writes a node's ALREADY-RENDERED application.conf body
+// (typically NodeConfig.Render() or one half of SplitNodeConfig's return
+// pair) under dir/<node>/config/application.conf for the compose volume
+// mount. It takes pre-rendered content rather than a NodeConfig value
+// because the separated topology's two config shapes (cmd/network's and
+// cmd/pipeline's) come out of SplitNodeConfig as two distinct rendered
+// strings, not a NodeConfig either side could hold directly (SplitNodeConfig's
+// own doc explains why) — every caller in this repo renders before calling.
+func (p *ComposeProvision) WriteNodeConfig(t *testing.T, node string, cfg string) {
 	t.Helper()
 	confDir := filepath.Join(p.Dir, node, "config")
 	if err := os.MkdirAll(confDir, 0o755); err != nil {
 		t.Fatalf("compose: mkdir node config: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(confDir, "application.conf"), []byte(cfg.Render()), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(confDir, "application.conf"), []byte(cfg), 0o644); err != nil {
 		t.Fatalf("compose: write node config: %v", err)
+	}
+}
+
+// MakeContainerReadable loosens a directory tree the harness itself did not
+// write (permission-wise) to world-readable files / world-traversable dirs,
+// so a compose service can read it over a bind mount despite running as a
+// container-image UID that never matches the host user who wrote the tree.
+//
+// It exists for ProvisionExternalIdentity's output: filestore (the
+// production KMS-model keystore) deliberately writes 0700 dirs / 0600 files
+// — correct for the process runtime, where the same host user both mints and
+// reads the keys, but unreadable to cmd/pipeline's container user (uid 10001,
+// cmd/pipeline/Dockerfile) once that same tree is bind-mounted into the
+// pipeline container for the compose runtime's own external-key provisioning
+// (D9 keystore locality — ProvisionPipelineKey's doc). ProvisionCompose's own
+// NATS seed files sidestep the identical problem by writing 0644 directly
+// instead of going through filestore; this is that same discipline applied
+// after the fact to a tree this harness does not write itself.
+func MakeContainerReadable(t *testing.T, dir string) {
+	t.Helper()
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return os.Chmod(path, 0o755)
+		}
+		return os.Chmod(path, 0o644)
+	})
+	if err != nil {
+		t.Fatalf("compose: make %s container-readable: %v", dir, err)
 	}
 }
 

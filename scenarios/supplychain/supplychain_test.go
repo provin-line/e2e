@@ -412,7 +412,21 @@ func setupProcess(t *testing.T) scEnv {
 }
 
 // setupCompose provisions testdata/ (grants BEFORE the broker config renders)
-// and boots the three-node docker-compose topology.
+// and boots the three-org docker-compose topology — SIX node services
+// (mfg/dist/retail, each split into its own -network + -pipeline pair) plus
+// nats + pdpstub — the separated topology's compose twin of setupProcess,
+// mirrored org-for-org (A3; AGENTS.md rule 3: both runtimes describe the
+// same node/config layout). Bootstrap moves onto the external-key path here
+// too (same reason setupProcess's own doc gives): a separated pipeline needs
+// its wireauth-signing identity's private half in ITS OWN data dir, which a
+// registry-side mint (Bootstrap/mint mode) can never reach (D9 keystore
+// locality). retailer — no producing/chained loop of its own — now gets a
+// registered owner AND a dedicated node pipeline/process pair for the SAME
+// reason losswindow's retail org and setupProcess's retailNode do: its
+// pipeline's wireauth-signed RegisterAuditHead (fired for every consumed
+// head, including a sink's) is a boot preflight once there is a wire
+// boundary to cross — which the compose runtime now has too, unlike before
+// this migration.
 func setupCompose(t *testing.T) scEnv {
 	scenarioDir, err := os.Getwd()
 	if err != nil {
@@ -430,14 +444,33 @@ func setupCompose(t *testing.T) scEnv {
 	prov.WriteBrokerConfig(t)
 
 	regURLsInNet := map[string]string{
-		mfgRegistry:    "http://mfg:8443",
-		distRegistry:   "http://dist:8443",
-		retailRegistry: "http://retail:8443",
+		mfgRegistry:    "http://mfg-network:8443",
+		distRegistry:   "http://dist-network:8443",
+		retailRegistry: "http://retail-network:8443",
 	}
-	writeNode := func(node, account, registryID, nodeDID, vcStore, loops, extra string) {
-		prov.WriteNodeConfig(t, node, harness.NodeConfig{
-			AllowPrivateNetworks: true,
-			ListenAddr:           ":8443",
+
+	// writeOrg provisions one org's pipeline-local keys (external-key path,
+	// D9 keystore locality — same as setupProcess's startOrg), splits its
+	// config via SplitNodeConfig, and writes both halves under testdata — the
+	// compose-runtime twin of startOrg, minus actually starting the
+	// processes (ComposeUp starts every org's containers together, below).
+	writeOrg := func(node, account, registryID, nodeDID, loops, extra string, pipelines, processes []string) map[string]harness.ExternalKeys {
+		networkNode := node + "-network"
+		pipelineNode := node + "-pipeline"
+		pipelineDataDir := filepath.Join(testdata, pipelineNode, "data")
+
+		extKeys := make(map[string]harness.ExternalKeys, len(pipelines)+len(processes))
+		for _, d := range pipelines {
+			extKeys[d] = harness.ProvisionExternalIdentity(t, pipelineDataDir, d)
+		}
+		for _, d := range processes {
+			extKeys[d] = harness.ProvisionExternalIdentity(t, pipelineDataDir, d)
+		}
+		harness.MakeContainerReadable(t, filepath.Join(pipelineDataDir, "keys"))
+
+		networkCfg, pipelineCfg := harness.SplitNodeConfig(harness.SeparatedConfig{
+			NetworkListenAddr:    ":8443",
+			PipelineListenAddr:   ":8443",
 			RegistryID:           registryID,
 			PDPBaseURL:           "http://pdpstub:9091",
 			NATSURL:              "nats://nats:4222",
@@ -446,39 +479,65 @@ func setupCompose(t *testing.T) scEnv {
 			ResolverDir:          "/app/jwts",
 			NodeDID:              nodeDID,
 			RegistryBaseURLs:     regURLsInNet,
-			VCStoreEndpoint:      vcStore,
+			AllowPrivateNetworks: true,
 			LoopsBlock:           loops,
-			Extra:                extra,
+			Tunables:             extra,
 		})
+		prov.WriteNodeConfig(t, networkNode, networkCfg)
+		prov.WriteNodeConfig(t, pipelineNode, pipelineCfg)
+		return extKeys
 	}
-	writeNode("mfg", "manufacturer", mfgRegistry, mfgOwnerDID, "http://mfg:8443", mfgLoops(), "")
-	writeNode("dist", "distributor", distRegistry, distOwnerDID, "http://dist:8443", distLoops("http://mfg:8443"), harness.FastTunables)
-	writeNode("retail", "retailer", retailRegistry, retailOwnerDID, "", retailLoops("http://dist:8443"), harness.FastTunables)
+
+	mfgKeys := writeOrg("mfg", "manufacturer", mfgRegistry, lotProcessDID, mfgLoops(), "",
+		[]string{lotPipelineDID}, []string{lotProcessDID})
+	distKeys := writeOrg("dist", "distributor", distRegistry, distProcessDID, distLoops("http://mfg-network:8443"), harness.FastTunables,
+		[]string{distPipelineDID}, []string{distProcessDID})
+	retailKeys := writeOrg("retail", "retailer", retailRegistry, retailNodeProcessDID, retailLoops("http://dist-network:8443"), harness.FastTunables,
+		[]string{retailNodePipelineDID}, []string{retailNodeProcessDID})
 
 	c := harness.ComposeUp(t, scenarioDir)
 	natsMon := c.Port(t, "nats", 8222)
 	harness.WaitHTTPHealthy(t, "nats", "http://"+natsMon+"/healthz", 60*time.Second)
-	mfgBase := "http://" + c.Port(t, "mfg", 8443)
-	harness.WaitHTTPHealthy(t, "mfg", mfgBase+"/healthz", 60*time.Second)
-	distBase := "http://" + c.Port(t, "dist", 8443)
-	harness.WaitHTTPHealthy(t, "dist", distBase+"/healthz", 60*time.Second)
-	retailBase := "http://" + c.Port(t, "retail", 8443)
-	harness.WaitHTTPHealthy(t, "retail", retailBase+"/healthz", 60*time.Second)
+
+	// waitOrg waits each org's network then pipeline healthy on ITS OWN
+	// /readyz (dependency-aware, StartSeparatedNode's own choice — see its
+	// doc), returning the network's host-reachable base URL and the instant
+	// its readyz passed (WaitWireauthEpochSettle's anchor, below).
+	waitOrg := func(node string) (networkBase string, networkReady time.Time) {
+		networkNode, pipelineNode := node+"-network", node+"-pipeline"
+		networkBase = "http://" + c.Port(t, networkNode, 8443)
+		harness.WaitHTTPHealthy(t, networkNode, networkBase+"/readyz", 60*time.Second)
+		networkReady = time.Now()
+		pipelineBase := "http://" + c.Port(t, pipelineNode, 8443)
+		harness.WaitHTTPHealthy(t, pipelineNode, pipelineBase+"/readyz", 60*time.Second)
+		return networkBase, networkReady
+	}
+	mfgBase, mfgReady := waitOrg("mfg")
+	distBase, distReady := waitOrg("dist")
+	retailBase, retailReady := waitOrg("retail")
+
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, ingressSubject, 60*time.Second)
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, lotPipelineDID, 60*time.Second)
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, distPipelineDID, 60*time.Second)
 
-	// Operator bootstrap: every producing org registers on ITS OWN node, so
-	// its signing keys live only in its own keystore (KMS model per org).
-	// Mint mode, unchanged — still all-in-one (A2 migrates the process
-	// runtime only; the compose twin's own migration is a recorded
-	// follow-up, AGENTS.md rule 3). retailer stays unregistered here, same
-	// as before this migration: it has no wireauth boundary to cross in the
-	// all-in-one topology, so it never needed an owner or a node identity.
+	// Each org's own network process carries its own wireauth restart epoch
+	// (WaitWireauthEpochSettle's doc); calling it once per org in sequence
+	// converges on the single latest-binding org without double-counting
+	// (its own doc explains why chained calls compose correctly).
+	harness.WaitWireauthEpochSettle(mfgReady)
+	harness.WaitWireauthEpochSettle(distReady)
+	harness.WaitWireauthEpochSettle(retailReady)
+
+	// Operator bootstrap over the external-key path: every producing org
+	// registers on ITS OWN node, so its signing keys live only in its own
+	// keystore (KMS model per org), and the private halves never leave the
+	// PIPELINE's own local keystore (BootstrapExternal's doc).
 	mfgOwner := harness.NewOwner(t, mfgOwnerDID)
-	harness.Bootstrap(t, mfgBase, mfgOwner, []string{lotPipelineDID}, []string{lotProcessDID})
+	harness.BootstrapExternal(t, mfgBase, mfgOwner, []string{lotPipelineDID}, []string{lotProcessDID}, mfgKeys)
 	distOwner := harness.NewOwner(t, distOwnerDID)
-	harness.Bootstrap(t, distBase, distOwner, []string{distPipelineDID}, []string{distProcessDID})
+	harness.BootstrapExternal(t, distBase, distOwner, []string{distPipelineDID}, []string{distProcessDID}, distKeys)
+	retailOwner := harness.NewOwner(t, retailOwnerDID)
+	harness.BootstrapExternal(t, retailBase, retailOwner, []string{retailNodePipelineDID}, []string{retailNodeProcessDID}, retailKeys)
 
 	readSeed := func(name string) string {
 		b, err := os.ReadFile(filepath.Join(testdata, name+"-account.seed"))
@@ -494,7 +553,7 @@ func setupCompose(t *testing.T) scEnv {
 		natsURL:    "nats://" + c.Port(t, "nats", 4222),
 		mfgSeed:    readSeed("manufacturer"),
 		eveSeed:    readSeed("eavesdropper"),
-		retailSink: func() []string { return c.SinkLines(t, "retail") },
+		retailSink: func() []string { return c.SinkLines(t, "retail-pipeline") },
 		registryURL: map[string]string{
 			mfgRegistry:    mfgBase,
 			distRegistry:   distBase,

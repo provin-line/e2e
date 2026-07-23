@@ -202,6 +202,26 @@ func writeConfigFile(dir, cfg string) (string, error) {
 // more reliable anchor than spawn time) leaves a comfortable margin.
 const wireauthEpochSettle = 8 * time.Second
 
+// WaitWireauthEpochSettle blocks until wireauthEpochSettle has elapsed since
+// readyAt (a network process's own /readyz-PASSING instant — see
+// wireauthEpochSettle's doc for why that anchor, not process-spawn time), or
+// returns immediately if it already has. StartSeparatedNode applies this
+// wait internally for the process runtime; anything that stands up a network
+// process OUTSIDE that path — a compose-runtime topology, where docker
+// compose itself starts the container — must call this before issuing any
+// wireauth-signed call (RegisterAuditHead, RetainPayload, ResolvePayload,
+// MirrorLogSegment) against it. Exported (rather than the raw duration) so
+// every caller applies the identical since-readyAt-not-since-now semantics —
+// a multi-org caller can call it once per org's own readyAt in sequence: a
+// later call's Since already reflects time an earlier call spent sleeping,
+// so the net wait converges on the SINGLE latest-binding org without
+// double-counting.
+func WaitWireauthEpochSettle(readyAt time.Time) {
+	if remaining := wireauthEpochSettle - time.Since(readyAt); remaining > 0 {
+		time.Sleep(remaining)
+	}
+}
+
 // StartSeparatedNode boots the production separated topology as two real
 // processes: cmd/network first (its config via the same application.conf
 // convention StartNode uses), waited healthy on ITS OWN /readyz, then
@@ -233,11 +253,10 @@ func StartSeparatedNode(t *testing.T, spec SeparatedNodeSpec) *SeparatedNode {
 	pipeline := runNodeProcess(t, spec.Name+"-pipeline", spec.PipelineBin, spec.PipelineDir, pipelineBaseURL, []string{"CONFIG_FILE=" + confPath})
 	waitHealthy(t, pipeline.Name, pipeline.BaseURL+"/readyz", pipeline)
 
-	// wireauthEpochSettle: block until network's own wireauth restart epoch
-	// has cleared — see its doc for why readyz does not already cover this.
-	if remaining := wireauthEpochSettle - time.Since(networkReady); remaining > 0 {
-		time.Sleep(remaining)
-	}
+	// Block until network's own wireauth restart epoch has cleared — see
+	// WaitWireauthEpochSettle's doc for why readyz does not already cover
+	// this.
+	WaitWireauthEpochSettle(networkReady)
 
 	return &SeparatedNode{
 		Name:     spec.Name,

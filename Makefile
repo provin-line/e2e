@@ -22,9 +22,14 @@ clone:
 			git clone $(url) $(REPOS_DIR)/$(name) || echo "  -> $(name) clone failed, continuing"; \
 		fi;)
 
-## Build Docker images from cloned repos (compose runtime)
+## Build Docker images from cloned repos (compose runtime). A3: the compose
+## topology moved off the all-in-one cmd/standalone image onto the separated
+## cmd/network + cmd/pipeline pair, mirroring the process runtime's own split
+## (AGENTS.md rule 3) — no scenario's docker-compose.yml references
+## provin-line/standalone:local anymore.
 docker-build: clone
-	docker build -t provin-line/standalone:local -f $(REPOS_DIR)/oss/cmd/standalone/Dockerfile $(REPOS_DIR)/oss
+	docker build -t provin-line/network:local -f $(REPOS_DIR)/oss/cmd/network/Dockerfile $(REPOS_DIR)/oss
+	docker build -t provin-line/pipeline:local -f $(REPOS_DIR)/oss/cmd/pipeline/Dockerfile $(REPOS_DIR)/oss
 	docker build -t provin-line/pdpstub:local -f cmd/pdpstub/Dockerfile .
 
 ## Run all scenarios (process runtime by default; E2E_RUNTIME=compose for containers)
