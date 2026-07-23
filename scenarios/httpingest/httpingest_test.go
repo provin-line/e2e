@@ -93,11 +93,13 @@ func loopsBlock(selfBase string) string {
 
 func TestHTTPIngest_PushToVerifiedChain(t *testing.T) {
 	runScenario(t, harness.StartSingleNode(t, harness.SingleNodeSpec{
-		Account:    "acme",
-		RegistryID: registryID,
-		NodeDID:    ownerDID,
-		Loops:      loopsBlock,
-		Tunables:   harness.FastTunables,
+		Account:      "acme",
+		RegistryID:   registryID,
+		NodeDID:      srcProcessDID,
+		PipelineDIDs: []string{srcPipelineDID},
+		ProcessDIDs:  []string{srcProcessDID},
+		Loops:        loopsBlock,
+		Tunables:     harness.FastTunables,
 		// The sink's subscription is gated broker-side; the push-enabled
 		// source's readiness is asserted through the product's own health
 		// route below (that surface IS the deployment's readiness signal).
@@ -105,20 +107,22 @@ func TestHTTPIngest_PushToVerifiedChain(t *testing.T) {
 	}))
 }
 
+// runScenario is the runtime-independent story: stimulate, assert.
+// StartSingleNode has already bootstrapped the owner + pipeline + process
+// over the wire.
 func runScenario(t *testing.T, e harness.SingleNodeEnv) {
 	ctx := context.Background()
-
-	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.NodeBase, owner, []string{srcPipelineDID}, []string{srcProcessDID})
 
 	// A bounded client so a wedged connection fails the WaitFor tick instead
 	// of hanging the whole test past its deadline (harness waitHealthy idiom).
 	httpc := &http.Client{Timeout: 5 * time.Second}
 
 	// The push surface's public health route is the readiness signal: it turns
-	// 200 only once the loop's broker subscription is confirmed.
+	// 200 only once the loop's broker subscription is confirmed. It lives on
+	// the DATA plane (cmd/pipeline/push.go) — e.PipelineBase, not e.NodeBase
+	// (the control plane, cmd/network, hosts no push-ingress route at all).
 	harness.WaitFor(t, "push health 200", 60*time.Second, func() bool {
-		resp, err := httpc.Get(e.NodeBase + healthPath)
+		resp, err := httpc.Get(e.PipelineBase + healthPath)
 		if err != nil {
 			return false
 		}
@@ -128,7 +132,7 @@ func runScenario(t *testing.T, e harness.SingleNodeEnv) {
 
 	post := func(auth, body string) (*http.Response, string) {
 		t.Helper()
-		req, err := http.NewRequest(http.MethodPost, e.NodeBase+pushPath, strings.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, e.PipelineBase+pushPath, strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}

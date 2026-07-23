@@ -11,10 +11,19 @@ import (
 
 // SingleNodeEnv is what a single-node scenario body needs from either runtime.
 type SingleNodeEnv struct {
-	NodeBase  string // control-plane base URL, host-reachable
-	NATSURL   string // broker URL, host-reachable
-	AcctSeed  string // the account seed for producer connections
-	SinkLines func() []string
+	NodeBase string // control-plane base URL, host-reachable
+	// PipelineBase is the data-plane base URL, host-reachable — where an
+	// HTTP-facing data-plane surface lives (cmd/pipeline/push.go's
+	// /ingest/<loop>/push and /health routes; a push-enabled loop's HTTP
+	// ingress). On the compose runtime (still all-in-one; A2 migrates the
+	// process runtime only) it equals NodeBase — one process serves both
+	// planes. On the process runtime it is cmd/pipeline's OWN base URL,
+	// DIFFERENT from NodeBase (cmd/network's) — the separated topology's data
+	// plane and control plane are two processes on two ports.
+	PipelineBase string
+	NATSURL      string // broker URL, host-reachable
+	AcctSeed     string // the account seed for producer connections
+	SinkLines    func() []string
 	// RestartNode stops and restarts the standalone node with its SAME data
 	// dir, blocking until it is healthy and its loops resubscribed (the
 	// spec's IngressSubjects), and returns the node's base URL VALID AFTER
@@ -180,10 +189,11 @@ func startSingleNodeProcess(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 	BootstrapExternal(t, sn.BaseURL, owner, spec.PipelineDIDs, spec.ProcessDIDs, extKeys)
 
 	return SingleNodeEnv{
-		NodeBase:  sn.BaseURL,
-		NATSURL:   broker.URL,
-		AcctSeed:  acct.Seed,
-		SinkLines: func() []string { return sn.SinkLines() },
+		NodeBase:     sn.BaseURL,
+		PipelineBase: "http://127.0.0.1" + pipelineListen,
+		NATSURL:      broker.URL,
+		AcctSeed:     acct.Seed,
+		SinkLines:    func() []string { return sn.SinkLines() },
 		RestartNode: func() string {
 			sn.Stop(t)
 			sn = startBoth()
@@ -248,10 +258,11 @@ func startSingleNodeCompose(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 		t.Fatal(err)
 	}
 	return SingleNodeEnv{
-		NodeBase:  nodeBase,
-		NATSURL:   "nats://" + c.Port(t, "nats", 4222),
-		AcctSeed:  strings.TrimSpace(string(seed)),
-		SinkLines: func() []string { return c.SinkLines(t, spec.Account) },
+		NodeBase:     nodeBase,
+		PipelineBase: nodeBase, // still all-in-one: one process serves both planes
+		NATSURL:      "nats://" + c.Port(t, "nats", 4222),
+		AcctSeed:     strings.TrimSpace(string(seed)),
+		SinkLines:    func() []string { return c.SinkLines(t, spec.Account) },
 		RestartNode: func() string {
 			c.RestartService(t, spec.Account)
 			// Ephemeral host ports are re-allocated on container restart:
