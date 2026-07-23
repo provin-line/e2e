@@ -126,18 +126,14 @@ func TestArchiveVerify_ChainOutlivesInfrastructure(t *testing.T) {
 	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "acme",
 		RegistryID:      registryID,
-		NodeDID:         ownerDID,
+		NodeDID:         srcProcessDID,
+		PipelineDIDs:    []string{srcPipelineDID, relayPipelineDID},
+		ProcessDIDs:     []string{srcProcessDID, relayProcessDID},
 		Loops:           loopsBlock,
 		Tunables:        harness.FastTunables,
 		IngressSubjects: []string{ingressSubject, srcPipelineDID, relayPipelineDID},
 	})
 	ctx := context.Background()
-
-	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.NodeBase, owner,
-		[]string{srcPipelineDID, relayPipelineDID},
-		[]string{srcProcessDID, relayProcessDID},
-	)
 
 	// --- Live phase: run the story, learn the head from the sink. ---
 	conn, err := natstransport.Connect(ctx, natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
