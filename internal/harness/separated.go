@@ -278,3 +278,60 @@ func ProvisionPipelineKey(t *testing.T, dataDir, subjectDID string) (pub []byte)
 	}
 	return kp.PublicKey
 }
+
+// ExternalKeys is one subject DID's local key material for the external-key
+// issuance path (BootstrapExternal): the public halves this scenario submits
+// to the registry over IssuePipelineRequest/IssueProcessRequest's
+// external_public_keys (field 3) — raw 32-byte Ed25519, matching
+// didregistry.ExternalPublicKeys/didpb.ExternalPublicKeys exactly. The
+// private halves stay only in the pipeline's own local keystore
+// (ProvisionExternalIdentity writes them there); the registry never sees
+// them.
+type ExternalKeys struct {
+	AuthPublicKey    []byte
+	SigningPublicKey []byte
+}
+
+// ProvisionExternalIdentity mints subjectDID's #auth AND #signing Ed25519
+// keypairs and saves BOTH into dataDir/keys — the same local keystore
+// ProvisionPipelineKey writes into, and the one cmd/pipeline's own boot
+// preflights and runtime signing read via filestore.New(dataDir+"/keys").
+// Unlike ProvisionPipelineKey (boot-preflight-only, #auth alone), this is
+// the full local half of the external-key issuance path: a subject that
+// ISSUES credentials (a loop's issuer DID, whose config names key-id
+// "signing" — pipeline/runtime/dataplane.go's vcdid.Signer, wired straight
+// to this same local keystore via cmd/pipeline's buildDeps) needs #signing
+// locally too, not only #auth (which alone covers a subject's wireauth
+// role — RegisterAuditHead/RetainPayload/ResolvePayload/MirrorLogSegment —
+// the only role ProvisionPipelineKey's callers needed).
+//
+// It mints BOTH keys for every subject unconditionally, mirroring the
+// registry's OWN mint-mode symmetry (didregistry.issue generates and
+// SaveKeyPairs both keystore.KeyIDAuth and keystore.KeyIDSigning for a
+// target DID regardless of which role actually uses which key) — cheaper
+// and less error-prone than this harness trying to track, per subject,
+// which of the two roles (wireauth signer vs. credential issuer) it will
+// actually play.
+//
+// Returns the public halves as ExternalKeys, for BootstrapExternal to
+// submit over the wire — this function itself publishes no DID document; it
+// only provisions the LOCAL side of the identity.
+func ProvisionExternalIdentity(t *testing.T, dataDir, subjectDID string) ExternalKeys {
+	t.Helper()
+	authKP, err := (ed25519.Generator{}).Generate()
+	if err != nil {
+		t.Fatalf("provision external identity %s: auth keygen: %v", subjectDID, err)
+	}
+	signKP, err := (ed25519.Generator{}).Generate()
+	if err != nil {
+		t.Fatalf("provision external identity %s: signing keygen: %v", subjectDID, err)
+	}
+	ks := filestore.New(filepath.Join(dataDir, "keys"))
+	if err := ks.SaveKeyPair(subjectDID, map[keystore.KeyID]*crypto.KeyPair{
+		keystore.KeyIDAuth:    authKP,
+		keystore.KeyIDSigning: signKP,
+	}); err != nil {
+		t.Fatalf("provision external identity %s: save: %v", subjectDID, err)
+	}
+	return ExternalKeys{AuthPublicKey: authKP.PublicKey, SigningPublicKey: signKP.PublicKey}
+}

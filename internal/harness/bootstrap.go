@@ -144,3 +144,73 @@ func Bootstrap(t *testing.T, nodeBaseURL string, owner *Owner, pipelineDIDs []st
 		}
 	}
 }
+
+// BootstrapExternal is Bootstrap's external-key twin for the separated
+// topology: it registers the owner exactly as Bootstrap does, then issues
+// every pipeline and process DID over IssuePipeline/IssueProcess's
+// external_public_keys path instead of the server-side mint Bootstrap uses —
+// the registry assembles and registers each document over the CALLER-supplied
+// public halves in keys and never generates or holds a private key for any
+// of them (see ProvisionExternalIdentity, which mints those halves into
+// cmd/pipeline's own local keystore so the separated data-plane process can
+// actually sign as these identities — a private key the registry minted
+// server-side would land in the WRONG process's data dir, D9 keystore
+// locality, ProvisionPipelineKey's doc).
+//
+// keys must carry an entry for every DID in pipelineDIDs and processDIDs
+// (ProvisionExternalIdentity's return value, keyed by subject DID) — a
+// missing entry is a harness bug, not a runtime condition, so it fails fast
+// via t.Fatalf rather than silently falling back to mint mode.
+func BootstrapExternal(t *testing.T, nodeBaseURL string, owner *Owner, pipelineDIDs []string, processDIDs []string, keys map[string]ExternalKeys) {
+	t.Helper()
+	ctx := context.Background()
+	client := didpbconnect.NewDIDServiceClient(http.DefaultClient, nodeBaseURL)
+
+	if _, err := client.RegisterOwner(ctx, Bearer(connect.NewRequest(&didpb.RegisterOwnerRequest{
+		DidDocument: owner.signedOwnerDoc(t),
+	}))); err != nil {
+		t.Fatalf("RegisterOwner(%s): %v (code %v)", owner.DID, err, connect.CodeOf(err))
+	}
+
+	externalKeysFor := func(subject string) *didpb.ExternalPublicKeys {
+		ext, ok := keys[subject]
+		if !ok {
+			t.Fatalf("BootstrapExternal(%s): no ExternalKeys provisioned — every pipeline/process DID needs ProvisionExternalIdentity called first", subject)
+		}
+		return &didpb.ExternalPublicKeys{
+			AuthPublicKey:    ext.AuthPublicKey,
+			SigningPublicKey: ext.SigningPublicKey,
+		}
+	}
+
+	for _, p := range pipelineDIDs {
+		dlg, err := delegation.Build(owner.Signer, owner.DID, delegation.DelegationSubject{ID: p, DelegatedBy: owner.DID})
+		if err != nil {
+			t.Fatalf("delegation.Build(%s): %v", p, err)
+		}
+		dlgBytes, err := json.Marshal(dlg)
+		if err != nil {
+			t.Fatalf("marshal delegation: %v", err)
+		}
+		if _, err := client.IssuePipeline(ctx, Bearer(connect.NewRequest(&didpb.IssuePipelineRequest{
+			TargetDid: p, Delegation: dlgBytes, ExternalPublicKeys: externalKeysFor(p),
+		}))); err != nil {
+			t.Fatalf("IssuePipeline(%s): %v (code %v)", p, err, connect.CodeOf(err))
+		}
+	}
+	for _, p := range processDIDs {
+		dlg, err := delegation.Build(owner.Signer, owner.DID, delegation.DelegationSubject{ID: p, DelegatedBy: owner.DID})
+		if err != nil {
+			t.Fatalf("delegation.Build(%s): %v", p, err)
+		}
+		dlgBytes, err := json.Marshal(dlg)
+		if err != nil {
+			t.Fatalf("marshal delegation: %v", err)
+		}
+		if _, err := client.IssueProcess(ctx, Bearer(connect.NewRequest(&didpb.IssueProcessRequest{
+			TargetDid: p, Delegation: dlgBytes, ExternalPublicKeys: externalKeysFor(p),
+		}))); err != nil {
+			t.Fatalf("IssueProcess(%s): %v (code %v)", p, err, connect.CodeOf(err))
+		}
+	}
+}
