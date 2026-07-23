@@ -119,18 +119,14 @@ func TestRecall_ForwardTraversalFromContaminatedOrigin(t *testing.T) {
 	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "acme",
 		RegistryID:      registryID,
-		NodeDID:         ownerDID,
+		NodeDID:         srcProcessDID,
+		PipelineDIDs:    []string{srcPipelineDID, aPipelineDID, bPipelineDID},
+		ProcessDIDs:     []string{srcProcessDID, aProcessDID, bProcessDID},
 		Loops:           loopsBlock,
 		Tunables:        harness.FastTunables,
 		IngressSubjects: []string{ingressSubject},
 	})
 	ctx := context.Background()
-
-	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.NodeBase, owner,
-		[]string{srcPipelineDID, aPipelineDID, bPipelineDID},
-		[]string{srcProcessDID, aProcessDID, bProcessDID},
-	)
 
 	conn, err := natstransport.Connect(ctx, natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
