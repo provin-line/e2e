@@ -58,6 +58,13 @@ func (c NodeConfig) Render() string {
     data-dir    = "./data"
     dev.allow-loopback     = %v
     allow-private-networks = %v
+    # This harness never configures node-native TLS (no cert/key) and the
+    # process-runtime listen-addr (FreePort's ":<port>") has no host segment,
+    # so core.ListenerIsLoopback cannot recognize it as loopback even though
+    # the harness only ever binds 127.0.0.1 — an explicit cleartext
+    # acknowledgement is the honest choice here (P0-6 transport-security
+    # guard), never a real deployment posture.
+    tls.allow-cleartext = true
   }
   auth.policy-verifier-url = %q
   registry {
