@@ -58,6 +58,15 @@ const (
 	distProcessDID  = "did:dplaax:dist.poc.dplaax.dev:org:dist:pipeline:lot-relay:process:checker"
 
 	retailOwnerDID = "did:dplaax:retail.poc.dplaax.dev:org:retail"
+	// retailer runs no producing/chained loop of its own (only a sink), so —
+	// same reasoning as losswindow's retail org — it gets a dedicated
+	// pipeline+process pair purely as its node identity: cmd/pipeline's
+	// wireauth-signed RegisterAuditHead fires for every consumed head
+	// (including a sink's) and is a boot preflight. The all-in-one topology
+	// never needed this (no wire boundary between control and data plane), so
+	// retailOwnerDID itself was never even registered before this migration.
+	retailNodePipelineDID = "did:dplaax:retail.poc.dplaax.dev:org:retail:pipeline:node"
+	retailNodeProcessDID  = retailNodePipelineDID + ":process:n1"
 
 	ingressSubject = "ingest.lot-emissions"
 )
@@ -137,12 +146,11 @@ func TestSupplyChain_ThreeOrgsOwnRegistries(t *testing.T) {
 		e = setupProcess(t)
 	}
 
-	// Operator bootstrap: every producing org registers on ITS OWN node, so
-	// its signing keys live only in its own keystore (KMS model per org).
-	mfgOwner := harness.NewOwner(t, mfgOwnerDID)
-	harness.Bootstrap(t, e.mfgBase, mfgOwner, []string{lotPipelineDID}, []string{lotProcessDID})
-	distOwner := harness.NewOwner(t, distOwnerDID)
-	harness.Bootstrap(t, e.distBase, distOwner, []string{distPipelineDID}, []string{distProcessDID})
+	// Operator bootstrap (mfg/dist/retail owners + pipelines/processes) has
+	// already happened inside setupProcess/setupCompose — the external-key
+	// path (process runtime) needs each org's PIPELINE data dir, which only
+	// the runtime-specific setup has; mint mode (compose) has no such need
+	// but moved alongside it for symmetry (see either setup func's own doc).
 
 	// The eavesdropper listens on both cross-org subjects in its own account:
 	// without grants it must receive nothing. The self-publish control proves
@@ -289,9 +297,13 @@ func TestSupplyChain_ThreeOrgsOwnRegistries(t *testing.T) {
 	}
 }
 
-// setupProcess boots the three nodes as subprocesses over the in-harness broker.
+// setupProcess boots the three orgs as separated (cmd/network + cmd/pipeline)
+// subprocess pairs over the in-harness broker — the separated topology's
+// twin of the retiring all-in-one cmd/standalone boot this used to do
+// (A2; the compose runtime's own migration is a recorded follow-up,
+// AGENTS.md rule 3 — setupCompose below is untouched).
 func setupProcess(t *testing.T) scEnv {
-	bin := harness.BuildStandalone(t)
+	networkBin, pipelineBin := harness.BuildBinaries(t)
 
 	workDir := t.TempDir()
 	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"),
@@ -306,10 +318,12 @@ func setupProcess(t *testing.T) scEnv {
 	broker.Grant(t, "manufacturer", "distributor", lotPipelineDID)
 	broker.Grant(t, "distributor", "retailer", distPipelineDID)
 
-	mfgListen, distListen, retailListen := harness.FreePort(t), harness.FreePort(t), harness.FreePort(t)
-	mfgBase := "http://127.0.0.1" + mfgListen
-	distBase := "http://127.0.0.1" + distListen
-	retailBase := "http://127.0.0.1" + retailListen
+	mfgNetworkListen, mfgPipelineListen := harness.FreePort(t), harness.FreePort(t)
+	distNetworkListen, distPipelineListen := harness.FreePort(t), harness.FreePort(t)
+	retailNetworkListen, retailPipelineListen := harness.FreePort(t), harness.FreePort(t)
+	mfgBase := "http://127.0.0.1" + mfgNetworkListen
+	distBase := "http://127.0.0.1" + distNetworkListen
+	retailBase := "http://127.0.0.1" + retailNetworkListen
 	regURLs := map[string]string{
 		mfgRegistry:    mfgBase,
 		distRegistry:   distBase,
@@ -317,31 +331,64 @@ func setupProcess(t *testing.T) scEnv {
 	}
 	pdp := harness.StartPDPStub(t, harness.FreePort(t))
 
-	startNode := func(name, listen, registryID, nodeDID, vcStore, loops, extra string, acc *harness.NATSAccount) *harness.Node {
-		dir := filepath.Join(workDir, name+"-node")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
+	// startOrg boots one org's separated pair and bootstraps ownerDID + every
+	// DID in pipelines/processes over the external-key path
+	// (ProvisionExternalIdentity into the PIPELINE's own data dir, then
+	// BootstrapExternal) — mirrors losswindow's newOrgNode, minus the
+	// restart-safe boot/bootstrap split (no org restarts in this scenario).
+	// pipelines MUST be provisioned before processes: see losswindow's
+	// newOrgNode doc for why (filestore's DID->directory nesting).
+	startOrg := func(name, networkListen, pipelineListen, registryID, ownerDID, nodeDID, tunables, loops string, pipelines, processes []string, acc *harness.NATSAccount) *harness.SeparatedNode {
+		networkDir := filepath.Join(workDir, name+"-network")
+		pipelineDir := filepath.Join(workDir, name+"-pipeline")
+		pipelineDataDir := filepath.Join(pipelineDir, "data")
+
+		extKeys := make(map[string]harness.ExternalKeys, len(pipelines)+len(processes))
+		for _, d := range pipelines {
+			extKeys[d] = harness.ProvisionExternalIdentity(t, pipelineDataDir, d)
 		}
-		return harness.StartNode(t, name, bin, dir, listen, harness.NodeConfig{
-			AllowLoopback:    true,
-			ListenAddr:       listen,
-			RegistryID:       registryID,
-			PDPBaseURL:       pdp,
-			NATSURL:          broker.URL,
-			AccountSeedFile:  acc.SeedFile,
-			TrustSeedFile:    broker.TrustSeedFile,
-			ResolverDir:      broker.ResolverDir,
-			NodeDID:          nodeDID,
-			RegistryBaseURLs: regURLs,
-			VCStoreEndpoint:  vcStore,
-			LoopsBlock:       loops,
-			Extra:            extra,
-		}.Render())
+		for _, d := range processes {
+			extKeys[d] = harness.ProvisionExternalIdentity(t, pipelineDataDir, d)
+		}
+
+		networkCfg, pipelineCfg := harness.SplitNodeConfig(harness.SeparatedConfig{
+			NetworkListenAddr:  networkListen,
+			PipelineListenAddr: pipelineListen,
+			RegistryID:         registryID,
+			PDPBaseURL:         pdp,
+			NATSURL:            broker.URL,
+			AccountSeedFile:    acc.SeedFile,
+			TrustSeedFile:      broker.TrustSeedFile,
+			ResolverDir:        broker.ResolverDir,
+			NodeDID:            nodeDID,
+			RegistryBaseURLs:   regURLs,
+			AllowLoopback:      true,
+			LoopsBlock:         loops,
+			Tunables:           tunables,
+		})
+		sn := harness.StartSeparatedNode(t, harness.SeparatedNodeSpec{
+			Name:               name,
+			NetworkBin:         networkBin,
+			NetworkListenAddr:  networkListen,
+			NetworkDir:         networkDir,
+			NetworkConfig:      networkCfg,
+			PipelineBin:        pipelineBin,
+			PipelineListenAddr: pipelineListen,
+			PipelineDir:        pipelineDir,
+			PipelineConfig:     pipelineCfg,
+		})
+
+		owner := harness.NewOwner(t, ownerDID)
+		harness.BootstrapExternal(t, sn.BaseURL, owner, pipelines, processes, extKeys)
+		return sn
 	}
 
-	startNode("manufacturer", mfgListen, mfgRegistry, mfgOwnerDID, mfgBase, mfgLoops(), "", mfgAcc)
-	startNode("distributor", distListen, distRegistry, distOwnerDID, distBase, distLoops(mfgBase), harness.FastTunables, distAcc)
-	retailNode := startNode("retailer", retailListen, retailRegistry, retailOwnerDID, "", retailLoops(distBase), harness.FastTunables, retailAcc)
+	startOrg("manufacturer", mfgNetworkListen, mfgPipelineListen, mfgRegistry, mfgOwnerDID, lotProcessDID, "", mfgLoops(),
+		[]string{lotPipelineDID}, []string{lotProcessDID}, mfgAcc)
+	startOrg("distributor", distNetworkListen, distPipelineListen, distRegistry, distOwnerDID, distProcessDID, harness.FastTunables, distLoops(mfgBase),
+		[]string{distPipelineDID}, []string{distProcessDID}, distAcc)
+	retailNode := startOrg("retailer", retailNetworkListen, retailPipelineListen, retailRegistry, retailOwnerDID, retailNodeProcessDID, harness.FastTunables, retailLoops(distBase),
+		[]string{retailNodePipelineDID}, []string{retailNodeProcessDID}, retailAcc)
 
 	// Gate every hop's subscription, not just the first: each hop is a
 	// fire-and-forget core-NATS publish, and /healthz does not imply the
@@ -420,6 +467,18 @@ func setupCompose(t *testing.T) scEnv {
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, ingressSubject, 60*time.Second)
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, lotPipelineDID, 60*time.Second)
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, distPipelineDID, 60*time.Second)
+
+	// Operator bootstrap: every producing org registers on ITS OWN node, so
+	// its signing keys live only in its own keystore (KMS model per org).
+	// Mint mode, unchanged — still all-in-one (A2 migrates the process
+	// runtime only; the compose twin's own migration is a recorded
+	// follow-up, AGENTS.md rule 3). retailer stays unregistered here, same
+	// as before this migration: it has no wireauth boundary to cross in the
+	// all-in-one topology, so it never needed an owner or a node identity.
+	mfgOwner := harness.NewOwner(t, mfgOwnerDID)
+	harness.Bootstrap(t, mfgBase, mfgOwner, []string{lotPipelineDID}, []string{lotProcessDID})
+	distOwner := harness.NewOwner(t, distOwnerDID)
+	harness.Bootstrap(t, distBase, distOwner, []string{distPipelineDID}, []string{distProcessDID})
 
 	readSeed := func(name string) string {
 		b, err := os.ReadFile(filepath.Join(testdata, name+"-account.seed"))
