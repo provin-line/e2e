@@ -28,7 +28,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -55,6 +54,15 @@ const (
 
 	lotPipelineDID = "did:dplaax:mfg.poc.dplaax.dev:org:mfg:pipeline:lots"
 	lotProcessDID  = "did:dplaax:mfg.poc.dplaax.dev:org:mfg:pipeline:lots:process:s1"
+
+	// retail runs no producing/chained loop of its own (only a sink), so it
+	// has no natural issuer DID to double as its node identity the way every
+	// single-node scenario's NodeDID reuses a loop's process DID (see
+	// SingleNodeSpec's doc) — cmd/pipeline's own wireauth-signed
+	// RegisterAuditHead call (every consumed head, including a sink's) still
+	// needs ONE, so retail gets a dedicated pipeline+process pair for it.
+	retailNodePipelineDID = "did:dplaax:retail.poc.dplaax.dev:org:retail:pipeline:node"
+	retailNodeProcessDID  = retailNodePipelineDID + ":process:n1"
 
 	ingressSubject = "ingest.lots"
 )
@@ -109,47 +117,98 @@ func TestLossWindow_EmissionLogNamesTheLoss(t *testing.T) {
 		t.Skip("losswindow compose twin (2-node compose file + provisioning) is a recorded follow-up; the process runtime covers the loss-window mechanics")
 	}
 	ctx := context.Background()
-	bin := harness.BuildStandalone(t)
+	networkBin, pipelineBin := harness.BuildBinaries(t)
 	workDir := t.TempDir()
 	broker := harness.StartNATS(t, filepath.Join(workDir, "nats"), "mfg", "retail")
 	mfgAcc := broker.Account(t, "mfg")
 	retailAcc := broker.Account(t, "retail")
 	broker.Grant(t, "mfg", "retail", lotPipelineDID)
 
-	mfgListen, retailListen := harness.FreePort(t), harness.FreePort(t)
-	mfgBase := "http://127.0.0.1" + mfgListen
-	regURLs := map[string]string{mfgRegistry: mfgBase, retailRegistry: "http://127.0.0.1" + retailListen}
+	mfgNetworkListen, mfgPipelineListen := harness.FreePort(t), harness.FreePort(t)
+	retailNetworkListen, retailPipelineListen := harness.FreePort(t), harness.FreePort(t)
+	mfgBase := "http://127.0.0.1" + mfgNetworkListen
+	retailBase := "http://127.0.0.1" + retailNetworkListen
+	regURLs := map[string]string{mfgRegistry: mfgBase, retailRegistry: retailBase}
 	pdp := harness.StartPDPStub(t, harness.FreePort(t))
 
-	startNode := func(name, listen, registryID, nodeDID, vcStore, loops, extra string, acc *harness.NATSAccount) *harness.Node {
-		dir := filepath.Join(workDir, name+"-node")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
+	// newOrgNode prepares (but does not yet start) one org's separated pair:
+	// it mints and locally provisions every DID in pipelines then processes
+	// (ProvisionExternalIdentity, into the PIPELINE's own data dir) and
+	// renders both configs (SplitNodeConfig) ONCE — boot restarts the SAME
+	// processes/dirs/configs, never re-provisioning or re-registering
+	// (IssuePipeline/IssueProcess is NOT idempotent like RegisterOwner, so a
+	// second Bootstrap call over an already-issued DID would fail
+	// AlreadyExists). bootstrap (also returned) registers everything over the
+	// wire exactly once, called only after the FIRST boot.
+	//
+	// Pipelines MUST be provisioned before processes (never a map — Go's
+	// randomized range order would provision them in either order): a process
+	// DID's own resource path structurally nests under its pipeline's
+	// (":pipeline:x:process:y" extends ":pipeline:x"), and filestore's
+	// DID->directory mapping (didDir, keystore/filestore/filestore.go) joins
+	// EVERY colon-separated DID segment as a nested path component — so
+	// provisioning the process first would MkdirAll the pipeline's own
+	// directory as a side effect, and the pipeline's later SaveKeyPair would
+	// then see it "already exists" and fail closed, even though it holds no
+	// real keyset yet (env.go's startSingleNodeProcess sidesteps this the
+	// same way — PipelineDIDs range fully before ProcessDIDs).
+	newOrgNode := func(name, networkListen, pipelineListen, registryID, ownerDID, nodeDID, tunables, loops string, pipelines, processes []string, acc *harness.NATSAccount) (boot func() *harness.SeparatedNode, bootstrap func(sn *harness.SeparatedNode)) {
+		networkDir := filepath.Join(workDir, name+"-network")
+		pipelineDir := filepath.Join(workDir, name+"-pipeline")
+		pipelineDataDir := filepath.Join(pipelineDir, "data")
+
+		extKeys := make(map[string]harness.ExternalKeys, len(pipelines)+len(processes))
+		for _, d := range pipelines {
+			extKeys[d] = harness.ProvisionExternalIdentity(t, pipelineDataDir, d)
 		}
-		return harness.StartNode(t, name, bin, dir, listen, harness.NodeConfig{
-			AllowLoopback:    true,
-			ListenAddr:       listen,
-			RegistryID:       registryID,
-			PDPBaseURL:       pdp,
-			NATSURL:          broker.URL,
-			AccountSeedFile:  acc.SeedFile,
-			TrustSeedFile:    broker.TrustSeedFile,
-			ResolverDir:      broker.ResolverDir,
-			NodeDID:          nodeDID,
-			RegistryBaseURLs: regURLs,
-			VCStoreEndpoint:  vcStore,
-			LoopsBlock:       loops,
-			Extra:            extra,
-		}.Render())
+		for _, d := range processes {
+			extKeys[d] = harness.ProvisionExternalIdentity(t, pipelineDataDir, d)
+		}
+
+		networkCfg, pipelineCfg := harness.SplitNodeConfig(harness.SeparatedConfig{
+			NetworkListenAddr:  networkListen,
+			PipelineListenAddr: pipelineListen,
+			RegistryID:         registryID,
+			PDPBaseURL:         pdp,
+			NATSURL:            broker.URL,
+			AccountSeedFile:    acc.SeedFile,
+			TrustSeedFile:      broker.TrustSeedFile,
+			ResolverDir:        broker.ResolverDir,
+			NodeDID:            nodeDID,
+			RegistryBaseURLs:   regURLs,
+			AllowLoopback:      true,
+			LoopsBlock:         loops,
+			Tunables:           tunables,
+		})
+		boot = func() *harness.SeparatedNode {
+			return harness.StartSeparatedNode(t, harness.SeparatedNodeSpec{
+				Name:               name,
+				NetworkBin:         networkBin,
+				NetworkListenAddr:  networkListen,
+				NetworkDir:         networkDir,
+				NetworkConfig:      networkCfg,
+				PipelineBin:        pipelineBin,
+				PipelineListenAddr: pipelineListen,
+				PipelineDir:        pipelineDir,
+				PipelineConfig:     pipelineCfg,
+			})
+		}
+		bootstrap = func(sn *harness.SeparatedNode) {
+			owner := harness.NewOwner(t, ownerDID)
+			harness.BootstrapExternal(t, sn.BaseURL, owner, pipelines, processes, extKeys)
+		}
+		return boot, bootstrap
 	}
 
-	mfgNode := startNode("mfg", mfgListen, mfgRegistry, mfgOwnerDID, mfgBase, mfgLoops(), "", mfgAcc)
-	retailNode := startNode("retail", retailListen, retailRegistry, retailOwnerDID, "", retailLoops(mfgBase), harness.FastTunables, retailAcc)
+	bootMfg, bootstrapMfg := newOrgNode("mfg", mfgNetworkListen, mfgPipelineListen, mfgRegistry, mfgOwnerDID, lotProcessDID, "", mfgLoops(),
+		[]string{lotPipelineDID}, []string{lotProcessDID}, mfgAcc)
+	bootRetail, bootstrapRetail := newOrgNode("retail", retailNetworkListen, retailPipelineListen, retailRegistry, retailOwnerDID, retailNodeProcessDID, harness.FastTunables, retailLoops(mfgBase),
+		[]string{retailNodePipelineDID}, []string{retailNodeProcessDID}, retailAcc)
 
-	mfgOwner := harness.NewOwner(t, mfgOwnerDID)
-	harness.Bootstrap(t, mfgBase, mfgOwner, []string{lotPipelineDID}, []string{lotProcessDID})
-	retailOwner := harness.NewOwner(t, retailOwnerDID)
-	harness.Bootstrap(t, regURLs[retailRegistry], retailOwner, nil, nil)
+	mfgNode := bootMfg()
+	bootstrapMfg(mfgNode)
+	retailNode := bootRetail()
+	bootstrapRetail(retailNode)
 
 	broker.WaitForSubscriber(t, ingressSubject, 30*time.Second)
 	broker.WaitForSubscriber(t, lotPipelineDID, 30*time.Second)
@@ -189,7 +248,7 @@ func TestLossWindow_EmissionLogNamesTheLoss(t *testing.T) {
 	waitLogSize(3)
 
 	// --- The consumer recovers; #4 flows again. ---
-	retailNode = startNode("retail", retailListen, retailRegistry, retailOwnerDID, "", retailLoops(mfgBase), harness.FastTunables, retailAcc)
+	retailNode = bootRetail()
 	broker.WaitForSubscriber(t, lotPipelineDID, 30*time.Second)
 	publish(4)
 	harness.WaitFor(t, "sink delivery #4 after recovery", 30*time.Second, func() bool {
@@ -198,13 +257,26 @@ func TestLossWindow_EmissionLogNamesTheLoss(t *testing.T) {
 
 	// --- Durability + sequence continuity: the PRODUCER restarts too. Its
 	// log must still cover 1..4, and the next emission must carry sequence
-	// 5, not fork back to 1 (the emitter self-seeds from the durable tail). ---
+	// 5, not fork back to 1 (the emitter self-seeds from the durable tail).
+	//
+	// GetLogCheckpoint is served by mfg's NETWORK process from its MIRRORED
+	// copy of the log — cmd/pipeline keeps the tlog locally and a mirror
+	// shipper ships segments to cmd/network asynchronously (separated
+	// topology only; the all-in-one binary served both reads and writes from
+	// the same in-process log, no lag possible). "Sink delivery #4" above
+	// only proves record 4 reached retail over NATS — NOT that mfg's mirror
+	// shipper has shipped it yet — so cpBefore must wait for size 4 itself,
+	// or it can race the shipper and capture a stale size-3 checkpoint that
+	// then legitimately grows to 4 across the restart below, failing the
+	// "restart changes nothing" assertion for a reason that has nothing to
+	// do with restart durability. ---
+	waitLogSize(4)
 	cpBefore, err := tlogClient.GetLogCheckpoint(ctx, harness.Bearer(connect.NewRequest(&tlogpb.GetLogCheckpointRequest{LogId: lotPipelineDID})))
 	if err != nil {
 		t.Fatalf("GetLogCheckpoint before producer restart: %v", err)
 	}
 	mfgNode.Stop(t)
-	mfgNode = startNode("mfg", mfgListen, mfgRegistry, mfgOwnerDID, mfgBase, mfgLoops(), "", mfgAcc)
+	mfgNode = bootMfg()
 	_ = mfgNode
 	broker.WaitForSubscriber(t, ingressSubject, 30*time.Second)
 	cpAfter, err := tlogClient.GetLogCheckpoint(ctx, harness.Bearer(connect.NewRequest(&tlogpb.GetLogCheckpointRequest{LogId: lotPipelineDID})))
