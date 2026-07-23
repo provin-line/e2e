@@ -129,17 +129,13 @@ func TestBranching_FanOutAndFilterDrop(t *testing.T) {
 	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "acme",
 		RegistryID:      registryID,
-		NodeDID:         ownerDID,
+		NodeDID:         srcProcessDID,
+		PipelineDIDs:    []string{srcPipelineDID, highPipelineDID, lowPipelineDID},
+		ProcessDIDs:     []string{srcProcessDID, highProcessDID, lowProcessDID},
 		Loops:           loopsBlock,
 		Tunables:        harness.FastTunables,
 		IngressSubjects: []string{ingressSubject},
 	})
-
-	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.NodeBase, owner,
-		[]string{srcPipelineDID, highPipelineDID, lowPipelineDID},
-		[]string{srcProcessDID, highProcessDID, lowProcessDID},
-	)
 
 	conn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
