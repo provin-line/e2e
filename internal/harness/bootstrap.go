@@ -49,7 +49,10 @@ func NewOwner(t *testing.T, ownerDID string) *Owner {
 	if err := ks.SaveKeyPair(ownerDID, map[keystore.KeyID]*crypto.KeyPair{keystore.KeyIDSigning: kp}); err != nil {
 		t.Fatalf("owner key save: %v", err)
 	}
-	return &Owner{DID: ownerDID, Signer: ed25519.NewSigner(ks), Pub: kp.PublicKey}
+	// ks (filestore.Store) implements crypto.Signer directly (the KMS-shaped
+	// Sign(did, keyID, data) seam) — the P0-3 keystore/crypto break removed the
+	// ed25519.NewSigner wrapper this used to need.
+	return &Owner{DID: ownerDID, Signer: ks, Pub: kp.PublicKey}
 }
 
 // signedOwnerDoc builds the owner's self-signed DID document registration body.
