@@ -103,24 +103,21 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 	runScenario(t, harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "acme",
 		RegistryID:      registryID,
-		NodeDID:         ownerDID,
+		NodeDID:         srcProcessDID,
+		PipelineDIDs:    []string{srcPipelineDID, relayPipelineDID},
+		ProcessDIDs:     []string{srcProcessDID, relayProcessDID},
 		Loops:           loopsBlock,
 		Tunables:        harness.FastTunables,
 		IngressSubjects: []string{ingressSubject},
 	}))
 }
 
-// runScenario is the runtime-independent story: bootstrap, stimulate, assert.
+// runScenario is the runtime-independent story: stimulate, assert.
+// StartSingleNode has already bootstrapped the owner + pipelines + processes
+// over the wire (mint mode on compose, the external-key path on process —
+// see SingleNodeSpec's doc).
 func runScenario(t *testing.T, e harness.SingleNodeEnv) {
 	ctx := context.Background()
-
-	// Operator bootstrap over the wire: owner + pipelines + processes. The
-	// registry mints and holds the process signing keys (KMS model).
-	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.NodeBase, owner,
-		[]string{srcPipelineDID, relayPipelineDID},
-		[]string{srcProcessDID, relayProcessDID},
-	)
 
 	// Inject one raw JSON reading as an external producer on the account.
 	conn, err := natstransport.Connect(context.Background(), natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
