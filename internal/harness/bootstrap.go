@@ -2,7 +2,6 @@ package harness
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -55,19 +54,28 @@ func NewOwner(t *testing.T, ownerDID string) *Owner {
 	return &Owner{DID: ownerDID, Signer: ks, Pub: kp.PublicKey}
 }
 
-// signedOwnerDoc builds the owner's self-signed DID document registration body.
+// signedOwnerDoc builds the owner's self-signed DID document registration
+// body. Multikey, not JWK: the W3C eddsa-jcs-2022 suite the registry's
+// verifyDocProof requires (exact dispatch — signer.suite.exact-dispatch)
+// pairs a Multikey-encoded verification method with an @context-bearing
+// proof; a JWK-encoded key matches no contract under that dispatch and is
+// rejected fail-closed (Fork-W's proof/key-shape migration — the legacy
+// JWK-era shape this used to build can still be READ by current oss, but a
+// document freshly signed in that shape no longer verifies). Mirrors oss's
+// own cmd/provin/internal/commands/owner.go selfSignedOwnerDoc exactly.
 func (o *Owner) signedOwnerDoc(t *testing.T) []byte {
 	t.Helper()
+	vm, err := did.NewMultikeyVerificationMethod(o.DID+"#signing", o.DID, o.Pub)
+	if err != nil {
+		t.Fatalf("encode owner signing key: %v", err)
+	}
 	base := did.New(did.DocumentFields{
-		ID: o.DID, Controller: o.DID,
-		VerificationMethod: []did.VerificationMethod{{
-			ID: o.DID + "#signing", Type: "JsonWebKey2020", Controller: o.DID,
-			PublicKeyJWK: map[string]any{
-				"kty": "OKP", "crv": "Ed25519",
-				"x": base64.RawURLEncoding.EncodeToString(o.Pub),
-			},
-		}},
-		AssertionMethod: []string{o.DID + "#signing"},
+		// Load-bearing: the proof mirrors this onto itself (vc-di-eddsa
+		// §3.3.1 step 2), and the suite classifier requires that mirror.
+		Context: did.IssuedDocumentContexts(),
+		ID:      o.DID, Controller: o.DID,
+		VerificationMethod: []did.VerificationMethod{vm},
+		AssertionMethod:    []string{o.DID + "#signing"},
 	})
 	body := base.Body()
 	proof, err := vc.CreateProof(o.Signer, o.DID, string(keystore.KeyIDSigning), o.DID+"#signing", body, vc.CryptosuiteEdDSAJCS2022)
