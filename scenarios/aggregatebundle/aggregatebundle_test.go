@@ -136,17 +136,13 @@ func TestAggregateBundle_SourceCommitmentOutlivesInfrastructure(t *testing.T) {
 	e := harness.StartSingleNode(t, harness.SingleNodeSpec{
 		Account:         "plant",
 		RegistryID:      registryID,
-		NodeDID:         ownerDID,
+		NodeDID:         aggProcess,
+		PipelineDIDs:    []string{sensorAPipeline, sensorBPipeline, aggPipeline},
+		ProcessDIDs:     []string{sensorAProcess, sensorBProcess, aggProcess},
 		Loops:           loopsBlock,
 		Tunables:        harness.FastTunables,
 		IngressSubjects: []string{"ingest.sensor-a", "ingest.sensor-b"},
 	})
-
-	owner := harness.NewOwner(t, ownerDID)
-	harness.Bootstrap(t, e.NodeBase, owner,
-		[]string{sensorAPipeline, sensorBPipeline, aggPipeline},
-		[]string{sensorAProcess, sensorBProcess, aggProcess},
-	)
 
 	conn, err := natstransport.Connect(ctx, natstransport.Config{URL: e.NATSURL, AccountSeed: e.AcctSeed})
 	if err != nil {
@@ -235,6 +231,10 @@ func TestAggregateBundle_SourceCommitmentOutlivesInfrastructure(t *testing.T) {
 		"--head", head, "--out", linDir,
 		"--did-base", registryID+"="+e.NodeBase,
 		"--allow-loopback",
+		// --aggregate-complete defaults to true (cmd/provin/main.go) — must be
+		// explicitly disabled for a v1 linear-only export, or this bundle would
+		// carry the SAME aggregate-complete scope as aggDir above.
+		"--aggregate-complete=false",
 	)
 	if !ok {
 		t.Fatalf("linear export failed:\n%s", out)
