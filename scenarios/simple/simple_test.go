@@ -114,7 +114,7 @@ func TestSimple_SourceChainedSink(t *testing.T) {
 
 // runScenario is the runtime-independent story: stimulate, assert.
 // StartSingleNode has already bootstrapped the owner + pipelines + processes
-// over the wire (mint mode on compose, the external-key path on process —
+// over the wire (the external-key path on both runtimes —
 // see SingleNodeSpec's doc).
 func runScenario(t *testing.T, e harness.SingleNodeEnv) {
 	ctx := context.Background()

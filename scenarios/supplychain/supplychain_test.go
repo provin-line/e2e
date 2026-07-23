@@ -148,9 +148,8 @@ func TestSupplyChain_ThreeOrgsOwnRegistries(t *testing.T) {
 
 	// Operator bootstrap (mfg/dist/retail owners + pipelines/processes) has
 	// already happened inside setupProcess/setupCompose — the external-key
-	// path (process runtime) needs each org's PIPELINE data dir, which only
-	// the runtime-specific setup has; mint mode (compose) has no such need
-	// but moved alongside it for symmetry (see either setup func's own doc).
+	// path (both runtimes) needs each org's PIPELINE data dir, which only
+	// the runtime-specific setup has (see either setup func's own doc).
 
 	// The eavesdropper listens on both cross-org subjects in its own account:
 	// without grants it must receive nothing. The self-publish control proves
