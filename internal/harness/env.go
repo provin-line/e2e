@@ -26,7 +26,7 @@ type SingleNodeEnv struct {
 	// RestartNode stops and restarts BOTH the network and pipeline
 	// processes/containers with their SAME data dirs (network first, then
 	// pipeline, mirroring StartSeparatedNode's own boot order — pipeline's
-	// wireauth-signed calls need a healthy, epoch-settled network peer),
+	// wireauth-signed calls need a healthy network peer),
 	// blocking until each is healthy and the pipeline's loops resubscribed
 	// (the spec's IngressSubjects), and returns the NETWORK base URL VALID
 	// AFTER the restart. A deployment restart: file-backed state survives,
@@ -288,7 +288,6 @@ func startSingleNodeCompose(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 	// actually live, not merely that the HTTP listener accepted a connection.
 	networkHostBase := "http://" + c.Port(t, networkService, 8443)
 	WaitHTTPHealthy(t, networkService, networkHostBase+"/readyz", 60*time.Second)
-	networkReady := time.Now()
 	pipelineHostBase := "http://" + c.Port(t, pipelineService, 8443)
 	WaitHTTPHealthy(t, pipelineService, pipelineHostBase+"/readyz", 60*time.Second)
 
@@ -296,12 +295,12 @@ func startSingleNodeCompose(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 		WaitForSubscriberHTTP(t, "http://"+natsMon, subj, 60*time.Second)
 	}
 
-	// A freshly-constructed network process's own restart-epoch anti-replay
-	// barrier rejects any wireauth-signed call issued too soon after boot —
-	// a container process is a process, so the SAME hard-coded window
-	// (WaitWireauthEpochSettle's doc) applies here, not only on the
-	// bare-subprocess runtime.
-	WaitWireauthEpochSettle(networkReady)
+	// No epoch-settle wait here. BootstrapExternal below uses the DID
+	// registration path (bearer + document proof), never wireauth, so it was
+	// never subject to the restart-epoch barrier. What the old wait protected
+	// was the pipeline's FIRST wireauth-signed emissions once stimulus flows —
+	// and those are now retried (re-signed) by the production client until
+	// network's boot window clears (PR #23).
 
 	// Wire bootstrap over the external-key path (BootstrapExternal), same as
 	// the process runtime: the registry never mints a private key for a
@@ -331,16 +330,15 @@ func startSingleNodeCompose(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 		SinkLines:    func() []string { return c.SinkLines(t, pipelineService) },
 		RestartNode: func() string {
 			// Network first (StartSeparatedNode's own boot order — pipeline's
-			// wireauth-signed calls need a live, epoch-settled network peer),
-			// then pipeline, then the same epoch settle this function's own
-			// initial boot already waits out above.
+			// wireauth-signed calls need a live network peer), then pipeline.
+			// No epoch-settle wait: the production client's re-signing retry
+			// clears network's fresh restart-epoch boot window on its own
+			// (PR #23), same as this function's own initial boot above.
 			newNetworkBase := restartService(networkService)
-			networkReady := time.Now()
 			restartService(pipelineService)
 			for _, subj := range spec.IngressSubjects {
 				WaitForSubscriberHTTP(t, "http://"+natsMon, subj, 60*time.Second)
 			}
-			WaitWireauthEpochSettle(networkReady)
 			return newNetworkBase
 		},
 		// Pipeline first — cmd/pipeline's own D8 ordered shutdown drains its

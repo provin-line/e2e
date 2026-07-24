@@ -500,32 +500,26 @@ func setupCompose(t *testing.T) scEnv {
 
 	// waitOrg waits each org's network then pipeline healthy on ITS OWN
 	// /readyz (dependency-aware, StartSeparatedNode's own choice — see its
-	// doc), returning the network's host-reachable base URL and the instant
-	// its readyz passed (WaitWireauthEpochSettle's anchor, below).
-	waitOrg := func(node string) (networkBase string, networkReady time.Time) {
+	// doc), returning the network's host-reachable base URL.
+	waitOrg := func(node string) (networkBase string) {
 		networkNode, pipelineNode := node+"-network", node+"-pipeline"
 		networkBase = "http://" + c.Port(t, networkNode, 8443)
 		harness.WaitHTTPHealthy(t, networkNode, networkBase+"/readyz", 60*time.Second)
-		networkReady = time.Now()
 		pipelineBase := "http://" + c.Port(t, pipelineNode, 8443)
 		harness.WaitHTTPHealthy(t, pipelineNode, pipelineBase+"/readyz", 60*time.Second)
-		return networkBase, networkReady
+		return networkBase
 	}
-	mfgBase, mfgReady := waitOrg("mfg")
-	distBase, distReady := waitOrg("dist")
-	retailBase, retailReady := waitOrg("retail")
+	mfgBase := waitOrg("mfg")
+	distBase := waitOrg("dist")
+	retailBase := waitOrg("retail")
 
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, ingressSubject, 60*time.Second)
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, lotPipelineDID, 60*time.Second)
 	harness.WaitForSubscriberHTTP(t, "http://"+natsMon, distPipelineDID, 60*time.Second)
 
-	// Each org's own network process carries its own wireauth restart epoch
-	// (WaitWireauthEpochSettle's doc); calling it once per org in sequence
-	// converges on the single latest-binding org without double-counting
-	// (its own doc explains why chained calls compose correctly).
-	harness.WaitWireauthEpochSettle(mfgReady)
-	harness.WaitWireauthEpochSettle(distReady)
-	harness.WaitWireauthEpochSettle(retailReady)
+	// No epoch-settle wait: each org's network process has its own wireauth
+	// restart-epoch boot window, but a signed call racing it is retried
+	// (re-signed) by the production client until it clears (PR #23).
 
 	// Operator bootstrap over the external-key path: every producing org
 	// registers on ITS OWN node, so its signing keys live only in its own
