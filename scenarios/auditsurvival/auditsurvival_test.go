@@ -7,7 +7,7 @@
 // (GetAuditStatus) — and gets the same answers.
 //
 // HISTORY: this scenario began life as the CANARY for the in-memory-evidence
-// gap (findings #23): it asserted that a restart ERASES the evidence while
+// gap (E2E-F-023): it asserted that a restart ERASES the evidence while
 // identity survives, with instructions to flip when persistence landed. The
 // evidence-persistence slice landed (file-backed CAS under data-dir/evidence/)
 // and the canary fired exactly as designed; the assertions below are the

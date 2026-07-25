@@ -1,6 +1,6 @@
 // Scenario httpingest: data enters the provenance chain through the apipush
 // HTTP surface instead of a raw NATS publish — the deployment shape for data
-// sources that speak HTTP but not NATS (finding #2 follow-up).
+// sources that speak HTTP but not NATS (E2E-F-002 follow-up; FINDINGS.md).
 //
 // Story: a single node runs a push-enabled source loop and an observing sink.
 // The producer POSTs one JSON reading to /ingest/<loop>/push with an L1

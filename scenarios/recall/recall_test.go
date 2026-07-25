@@ -5,8 +5,9 @@
 // walks BACKWARD to the contaminated origin (previousCredential is inside
 // the signed body), then needs the FORWARD direction: every credential
 // derived from that origin, and each one's audit verdict. Before the
-// discovery layer this direction did not exist on any API (finding #25) and
-// heads could only be learned by scraping sink stdout (finding #26).
+// discovery layer this direction did not exist on any API (E2E-F-025) and
+// heads could only be learned by scraping sink stdout (E2E-F-026) — both in
+// FINDINGS.md.
 //
 // This scenario drives the three discovery RPCs over the wire:
 //   - VCResolverService.ListSuccessors: the forward step, paged one entry
