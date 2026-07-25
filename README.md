@@ -59,8 +59,13 @@ revision of this repo.
 deliberately **not** a gate: a red run there means the pair has drifted, not
 that either side is broken, and which side moves is a human call.
 
-Both cross-repo checkouts use a read-only deploy key, because a workflow's own
-`GITHUB_TOKEN` is scoped to its repository and cannot read a private sibling.
+Both cross-repo checkouts mint a short-lived GitHub App installation token,
+scoped to the single repository being read. A workflow's own `GITHUB_TOKEN` is
+scoped to its own repository and cannot read a private sibling, and this
+organisation disables deploy keys by policy — Apps are what it recommends
+instead. Setup is one App plus two settings (`CI_APP_ID` variable,
+`CI_APP_PRIVATE_KEY` secret), which may live at the organisation level and serve
+both repositories at once.
 
 ## Structure
 

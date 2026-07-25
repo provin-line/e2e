@@ -30,12 +30,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: app-token
+        name: mint a scoped token for the oss checkout
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: provin-line
+          repositories: oss
       - name: checkout oss at its default branch HEAD
         uses: actions/checkout@v4
         with:
           repository: provin-line/oss
           path: repos/oss
-          ssh-key: ${{ secrets.OSS_DEPLOY_KEY }}
+          token: ${{ steps.app-token.outputs.token }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

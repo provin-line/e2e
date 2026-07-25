@@ -44,17 +44,29 @@ jobs:
             exit 1
           }
           echo "oss_ref=$ref" >> "$GITHUB_OUTPUT"
-      # A deploy key, not the workflow token: GITHUB_TOKEN is scoped to this
-      # repository alone and cannot read a private sibling. The key's public
-      # half is a read-only deploy key on provin-line/oss; only the private
-      # half is here, as an encrypted Actions secret.
+      # An installation token from a GitHub App, not a deploy key: the
+      # provin-line organisation disables deploy keys by policy and points at
+      # Apps instead. GITHUB_TOKEN cannot be used either — it is scoped to this
+      # repository and cannot read a private sibling.
+      #
+      # The token is minted per job, expires in an hour, and `repositories:`
+      # narrows it to the one repo this job reads. Nothing long-lived and
+      # nothing user-scoped is involved.
+      - id: app-token
+        name: mint a scoped token for the oss checkout
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: provin-line
+          repositories: oss
       - name: checkout the pinned oss
         uses: actions/checkout@v4
         with:
           repository: provin-line/oss
           ref: ${{ steps.pin.outputs.oss_ref }}
           path: repos/oss
-          ssh-key: ${{ secrets.OSS_DEPLOY_KEY }}
+          token: ${{ steps.app-token.outputs.token }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -80,13 +92,21 @@ jobs:
             exit 1
           }
           echo "oss_ref=$ref" >> "$GITHUB_OUTPUT"
+      - id: app-token
+        name: mint a scoped token for the oss checkout
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: provin-line
+          repositories: oss
       - name: checkout the pinned oss
         uses: actions/checkout@v4
         with:
           repository: provin-line/oss
           ref: ${{ steps.pin.outputs.oss_ref }}
           path: repos/oss
-          ssh-key: ${{ secrets.OSS_DEPLOY_KEY }}
+          token: ${{ steps.app-token.outputs.token }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
