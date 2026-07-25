@@ -25,17 +25,42 @@ wireauth-signed peer calls, never JWT issuance or a policy-decision deny. The
 real three-layer auth stack (auth.provider + o3co policy-verifier) is exercised
 by `repos/oss`'s `deploy/quickstart`, not from here.
 
-Note: `make clone` fetches `repos/oss` from GitHub; a local development
-checkout may instead symlink `repos/oss` to a working copy, in which case the
-tested oss revision is whatever that working copy holds.
+## The oss revision under test
 
-## Setup
+`repos/oss` is an **input**, not something a build step maintains. `pins.env`
+names the revision by SHA, `make clone` fetches exactly that when `repos/oss` is
+absent, and nothing ever advances a checkout that already exists — a silent
+`git pull` would make a green run unattributable to any revision, and would
+rewrite a development checkout out from under whoever is working in it.
 
 ```bash
-make clone         # Clone or update dependency repos (oss)
-make test          # Run all scenarios (process runtime)
-make docker-build  # Build Docker images from cloned repos (compose runtime)
+make clone         # fetch repos/oss at the pinned revision (no-op if present)
+make checkout-oss  # move an existing checkout onto the pin (after editing it)
+make verify-pin    # fail unless repos/oss is exactly at the pin — CI's preflight
+make test          # all scenarios + harness tests (process runtime)
+make docker-build  # build the images the compose runtime needs
+make test-compose  # the same suite in containers
 ```
+
+A local development checkout may instead symlink `repos/oss` at a working copy,
+in which case the tested revision is whatever that copy holds and `verify-pin`
+fails by design — `pins.env` cannot vouch for a symlink's contents.
+
+## CI
+
+`.github/workflows/ci.yml` runs both runtimes against the pinned oss revision on
+every pull request. It gates one direction only: **an e2e change breaking
+against known-good oss.** The direction that matters more — an oss change
+breaking these scenarios — cannot be gated from here, because nothing in this
+repository runs when oss changes; that job lives in `provin.oss` and pins a
+revision of this repo.
+
+`oss-crosscheck.yml` runs the same suites against oss HEAD nightly and is
+deliberately **not** a gate: a red run there means the pair has drifted, not
+that either side is broken, and which side moves is a human call.
+
+Both cross-repo checkouts use a read-only deploy key, because a workflow's own
+`GITHUB_TOKEN` is scoped to its repository and cannot read a private sibling.
 
 ## Structure
 
@@ -58,6 +83,8 @@ e2e/
 ├── cmd/pdpstub/           ← allow-all policy-verifier (PDP) stub for scenarios
 ├── internal/harness/      ← provisioning + node lifecycle + assertion helpers
 ├── FINDINGS.md            ← the findings register (AGENTS.md rules 3 and 4)
+├── pins.env               ← the oss revision the suites are verified against
+├── .github/workflows/     ← ci (pinned, gating) + oss-crosscheck (HEAD, advisory)
 └── Makefile
 ```
 
