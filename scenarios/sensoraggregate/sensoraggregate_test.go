@@ -255,7 +255,8 @@ func TestSensorAggregate_SourceCommitmentOverTheWire(t *testing.T) {
 	// source_commitment verdict — EXACTLY the folded set, paged. This is
 	// the wire surface the aggregate-complete bundle follow-up and
 	// aggregate-crossing recall build on: until it existed, the manifest
-	// payload was the only (payload-convention) substitute (finding #17).
+	// payload was the only (payload-convention) substitute (E2E-F-017 in
+	// FINDINGS.md).
 	wantConsumed := make([]string, 0, len(sources))
 	for _, src := range sources {
 		h, err := src.Hash()

@@ -32,14 +32,22 @@ docker-build: clone
 	docker build -t provin-line/pipeline:local -f $(REPOS_DIR)/oss/cmd/pipeline/Dockerfile $(REPOS_DIR)/oss
 	docker build -t provin-line/pdpstub:local -f cmd/pdpstub/Dockerfile .
 
-## Run all scenarios (process runtime by default; E2E_RUNTIME=compose for containers)
+## Run all scenarios AND the harness's own tests (process runtime by default;
+## E2E_RUNTIME=compose for containers).
+##
+## ./... not ./scenarios/... : Go never runs a _test.go from an imported
+## dependency, so scoping this to the scenarios would silently skip
+## internal/harness's own suite — including TestComposeParity, the guard that
+## enforces AGENTS.md rule 3. A guard that does not run is worse than the
+## t.Skip it replaced: a skip at least prints.
 test:
-	go test ./scenarios/... -count=1 -timeout 20m
+	go test ./... -count=1 -timeout 20m
 
 test-simple:
 	go test ./scenarios/simple/... -count=1 -timeout 10m -v
 
 ## Run the compose-runtime scenarios (requires make docker-build).
 ## -p 1: one compose stack at a time — five concurrent stacks flake on slower hosts.
+## ./... for the same reason `test` uses it.
 test-compose:
-	E2E_RUNTIME=compose go test -p 1 ./scenarios/... -count=1 -timeout 40m
+	E2E_RUNTIME=compose go test -p 1 ./... -count=1 -timeout 40m

@@ -13,8 +13,8 @@
 //
 // HISTORY: this scenario originally had to INVENT its archive format — the
 // product defined no snapshot/export convention, so the survivability
-// property was real but unclaimable in practice (finding #24), and the
-// authority-chain rider (signing keys alone are NOT a sufficient archive;
+// property was real but unclaimable in practice (E2E-F-024 in FINDINGS.md),
+// and the authority-chain rider (signing keys alone are NOT a sufficient archive;
 // the controller walk needs process AND pipeline AND owner documents) was
 // discovered by this test failing. The product convention has since landed:
 // the audit bundle (`provin bundle export` / `provin bundle verify`), whose

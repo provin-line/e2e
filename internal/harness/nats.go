@@ -93,7 +93,7 @@ func StartNATS(t *testing.T, dir string, accountNames ...string) *NATS {
 			t.Fatalf("nats: natsop.New(%s): %v", name, err)
 		}
 		// Publish the bare account's claims so it is connectable before any
-		// grant exists (oss finding #14 fix).
+		// grant exists (the oss-side fix for E2E-F-014; FINDINGS.md).
 		if err := aop.PublishClaims(); err != nil {
 			t.Fatalf("nats: publish claims %s: %v", name, err)
 		}

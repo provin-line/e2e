@@ -12,10 +12,10 @@
 // Cross-organization delivery happens only through explicit NATS account
 // grants (mfg→dist on the lot subject, dist→retail on the relay subject); an
 // ungranted eavesdropper account receives nothing. Cross-registry DID
-// resolution uses the registry-base-urls map (oss findings #12 fix) — each
+// resolution uses the registry-base-urls map (the oss fix for E2E-F-012) — each
 // node maps all three registry ids to node base URLs, and the test-side
 // verifier does the same from the host. This lifts the 2-org scope reduction
-// the scenario originally shipped with (findings #12/#13).
+// the scenario originally shipped with (E2E-F-012/E2E-F-013).
 package supplychain
 
 import (

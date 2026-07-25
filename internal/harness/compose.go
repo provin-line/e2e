@@ -243,8 +243,14 @@ func ComposeUp(t *testing.T, scenarioDir string) *Compose {
 
 // RestartService restarts one service's process in its EXISTING container
 // (docker compose restart): container-local files (e.g. the node's /app/data
-// stores) survive, in-memory state is lost, and published port mappings are
-// preserved — the container twin of restarting a subprocess with its data dir.
+// stores) survive and in-memory state is lost — the container twin of
+// restarting a subprocess with its data dir. The container is NOT recreated,
+// so this does not exercise a fresh volume mount onto a replacement container.
+//
+// Published EPHEMERAL host ports are re-allocated across the restart, so a
+// caller holding a pre-restart host address must rediscover it with Port
+// before using it again (SingleNodeEnv.RestartNode's doc says the same to
+// scenarios).
 func (c *Compose) RestartService(t *testing.T, service string) {
 	t.Helper()
 	cmd := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "restart", service)
@@ -262,6 +268,21 @@ func (c *Compose) StopService(t *testing.T, service string) {
 	cmd.Dir = c.dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("compose stop %s: %v\n%s", service, err, out)
+	}
+}
+
+// StartService starts one service that was stopped with StopService, reusing
+// its existing container and therefore its container-local state — the twin of
+// StopService, and the pair a scenario needs to model an outage window rather
+// than a restart (RestartService cannot express "stay down while something
+// else happens"). Ephemeral host ports are re-allocated here for the same
+// reason they are on restart, so rediscover with Port after starting.
+func (c *Compose) StartService(t *testing.T, service string) {
+	t.Helper()
+	cmd := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "start", service)
+	cmd.Dir = c.dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("compose start %s: %v\n%s", service, err, out)
 	}
 }
 
