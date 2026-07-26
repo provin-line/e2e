@@ -1,0 +1,61 @@
+# Tracks provin.oss's default branch: run both runtimes against oss HEAD
+# instead of the pinned revision.
+#
+# Direction matters, and so does authority. This is the harness watching the
+# product — an early signal only. A red run here does NOT mean oss is broken
+# and does NOT mean this repository is broken; it means the pair has drifted,
+# and the catch-up work could be on either side. The pin in pins.env remains
+# what the regular gate runs against until a bump is deliberately committed
+# with evidence (see pins.env). Deciding which side moves is a human call.
+#
+# The same shape provin.oss's spec-crosscheck.yml uses for the dPLaaX spec:
+# in-tree pin gates, HEAD-watching informs.
+#
+# Not on pull_request or push on purpose. A job whose redness is ambiguous must
+# never block a merge, or its ambiguity gets resolved by whoever is in a hurry.
+name: oss-crosscheck
+
+on:
+  schedule:
+    # Offset from provin.oss's own spec-crosscheck (17 21 * * *) so a drift
+    # cascade shows up as two distinct signals rather than one pile.
+    - cron: '41 22 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crosscheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: app-token
+        name: mint a scoped token for the oss checkout
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: provin-line
+          repositories: oss
+      - name: checkout oss at its default branch HEAD
+        uses: actions/checkout@v4
+        with:
+          repository: provin-line/oss
+          path: repos/oss
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Deliberately NOT `make verify-pin`: testing HEAD is the whole point, so
+      # the checkout is expected to differ from the pin. Report the pair being
+      # tested instead, since that is what a reader of a red run needs first.
+      - name: report the pair under test
+        run: |
+          echo "pinned oss (what the gate uses): $(sed -n 's/^OSS_REF=//p' pins.env)"
+          echo "oss HEAD (what this run tests):  $(git -C repos/oss rev-parse HEAD)"
+          echo "e2e revision:                    $(git rev-parse HEAD)"
+      - run: make test
+      - run: make docker-build
+      - run: make test-compose

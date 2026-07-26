@@ -1,0 +1,119 @@
+# Gates a CHANGE TO THIS HARNESS against a known-good product revision.
+#
+# What this catches: an e2e change that breaks while oss is held still. That is
+# the only thing it can catch, and saying so matters — the more valuable
+# direction, "an oss change breaks the scenarios", cannot be gated from here,
+# because nothing in this repository runs when oss changes. That job lives in
+# provin.oss and pins a revision of this repo. A green run here is not evidence
+# about any oss commit other than the pinned one.
+#
+# The oss revision comes from pins.env, by SHA, and `make verify-pin` asserts
+# the checkout actually landed on it before anything runs. Tracking oss HEAD is
+# a separate non-gating job (oss-crosscheck.yml) — the same split provin.oss's
+# own spec-crosscheck.yml uses for the dPLaaX spec.
+#
+# Both runtimes are required, not just the cheap one: they are equivalent by
+# rule (AGENTS.md rule 3) and TestComposeParity enforces that every scenario
+# ships both, so gating only the process runtime would let the compose half rot
+# behind a guard that never runs against it.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: pin
+        name: read and validate the oss pin
+        run: |
+          ref=$(sed -n 's/^OSS_REF=//p' pins.env)
+          # pins.env states in prose that a pin is a SHA and never a branch
+          # name; this makes that enforceable rather than aspirational. It also
+          # means a value any pull request can edit reaches actions/checkout's
+          # ref: only if it is literally a commit id.
+          printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "pins.env: OSS_REF must be a full 40-character commit SHA, got '$ref'"
+            exit 1
+          }
+          echo "oss_ref=$ref" >> "$GITHUB_OUTPUT"
+      # An installation token from a GitHub App, not a deploy key: the
+      # provin-line organisation disables deploy keys by policy and points at
+      # Apps instead. GITHUB_TOKEN cannot be used either — it is scoped to this
+      # repository and cannot read a private sibling.
+      #
+      # The token is minted per job, expires in an hour, and `repositories:`
+      # narrows it to the one repo this job reads. Nothing long-lived and
+      # nothing user-scoped is involved.
+      - id: app-token
+        name: mint a scoped token for the oss checkout
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: provin-line
+          repositories: oss
+      - name: checkout the pinned oss
+        uses: actions/checkout@v4
+        with:
+          repository: provin-line/oss
+          ref: ${{ steps.pin.outputs.oss_ref }}
+          path: repos/oss
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Before the suite, not after: a checkout step that quietly resolved
+      # something other than the pin would otherwise produce a green run
+      # attributed to a revision it never tested.
+      - run: make verify-pin
+      # No nats-server install: the harness starts the real server in-process
+      # from the nats-server/v2 module (a direct dependency in go.mod).
+      - run: make test
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: pin
+        name: read and validate the oss pin
+        run: |
+          ref=$(sed -n 's/^OSS_REF=//p' pins.env)
+          printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "pins.env: OSS_REF must be a full 40-character commit SHA, got '$ref'"
+            exit 1
+          }
+          echo "oss_ref=$ref" >> "$GITHUB_OUTPUT"
+      - id: app-token
+        name: mint a scoped token for the oss checkout
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          owner: provin-line
+          repositories: oss
+      - name: checkout the pinned oss
+        uses: actions/checkout@v4
+        with:
+          repository: provin-line/oss
+          ref: ${{ steps.pin.outputs.oss_ref }}
+          path: repos/oss
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make verify-pin
+      # Docker and Compose v2 are preinstalled on the hosted Ubuntu runner.
+      - run: make docker-build
+      # Keeps the Makefile's own -p 1: the eleven compose stacks run serially,
+      # which is what makes this job slow rather than flaky.
+      - run: make test-compose

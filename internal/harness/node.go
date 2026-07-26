@@ -197,7 +197,19 @@ func (n *Node) SinkLines() []string {
 func waitHealthy(t *testing.T, name, url string, n *Node) {
 	t.Helper()
 	client := &http.Client{Timeout: 2 * time.Second}
-	deadline := time.Now().Add(30 * time.Second)
+	// 90s, not the 30s this used to allow. Boot readiness was the tightest
+	// budget in the harness — half of what the compose runtime's own health
+	// waits get — and it is the one that breaks first on a loaded or slow host:
+	// an otherwise-passing scenario failed here at 60s wall-clock while a large
+	// git clone ran alongside it, which is a mild version of what a two-core CI
+	// runner looks like all the time.
+	//
+	// Extending it is close to free. A healthy boot returns as soon as /readyz
+	// answers 200, so nothing slows down; and a node that DIES during boot is
+	// still reported immediately by the n.done branch below rather than after
+	// the deadline. The only case this lengthens is "alive but not ready yet" —
+	// exactly the case that deserves more patience.
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case <-n.done:
