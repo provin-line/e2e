@@ -153,6 +153,47 @@ func (p *ComposeProvision) WriteBrokerConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(p.Dir, "nats", "nats-server.conf"), []byte(b.String()), 0o644); err != nil {
 		t.Fatalf("compose: write nats-server.conf: %v", err)
 	}
+	// Last write to jwts/ happens above (via Grant), so this is the point the
+	// tree can be handed to the containers. See makeContainerWritable.
+	makeContainerWritable(t, filepath.Join(p.Dir, "jwts"))
+}
+
+// makeContainerWritable opens a bind-mounted tree to the container user for a
+// directory the node WRITES to, not merely reads.
+//
+// jwts/ is that directory: each node's DirPublisher rewrites account JWTs
+// there, which is why no scenario mounts it :ro. The harness writes the tree as
+// the host user; the node runs as the image's own unprivileged user (provin,
+// uid 10001 — see cmd/network's Dockerfile), and on Linux those uids simply do
+// not match, so the node fails its boot preflight with "load JWT: permission
+// denied" and the container exits before its healthcheck can ever pass.
+//
+// That failure is invisible on a macOS developer machine: Docker Desktop
+// virtualises bind-mount ownership, so the mismatch never surfaces until the
+// suite runs on a Linux host. It cost a CI run to find, which is the argument
+// for doing this centrally here rather than leaving each scenario to remember.
+//
+// chmod rather than chown because chown needs root and the harness has no
+// business asking for it; oss's own quickstart solves the same problem the
+// other way, with a privileged provision step that chowns to uid 10001. The
+// permissions are wide, and that is acceptable for a regenerated testdata/
+// fixture in a way it would never be for a deployment.
+func makeContainerWritable(t *testing.T, dir string) {
+	t.Helper()
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		// Directories need the execute+write bits so the container user can
+		// create NEW jwt files, not just rewrite the ones already there.
+		if d.IsDir() {
+			return os.Chmod(path, 0o777)
+		}
+		return os.Chmod(path, 0o666)
+	})
+	if err != nil {
+		t.Fatalf("compose: make %s container-writable: %v", dir, err)
+	}
 }
 
 // WriteNodeConfig writes a node's ALREADY-RENDERED application.conf body
