@@ -11,6 +11,10 @@
 # The same shape provin.oss's spec-crosscheck.yml uses for the dPLaaX spec:
 # in-tree pin gates, HEAD-watching informs.
 #
+# Actions here are pinned to commit SHAs because these steps handle a GitHub App
+# private key: a moved or compromised tag would receive it, and only a SHA is an
+# immutable reference.
+#
 # Not on pull_request or push on purpose. A job whose redness is ambiguous must
 # never block a merge, or its ambiguity gets resolved by whoever is in a hurry.
 name: oss-crosscheck
@@ -29,22 +33,28 @@ jobs:
   crosscheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: app-token
         name: mint a scoped token for the oss checkout
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: provin-line
           repositories: oss
+          # `repositories:` narrows WHICH repos, not which rights; without this
+          # the token inherits every permission the installation holds.
+          permission-contents: read
       - name: checkout oss at its default branch HEAD
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: provin-line/oss
           path: repos/oss
           token: ${{ steps.app-token.outputs.token }}
-      - uses: actions/setup-go@v5
+          # Keep the installation token out of the clone's git config, where
+          # every later step in the job could read it.
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
@@ -59,3 +69,35 @@ jobs:
       - run: make test
       - run: make docker-build
       - run: make test-compose
+
+      # Only now, with the pair proven green, is it safe to say the counterpart
+      # pin should move. provin.oss gates its own commits against a pinned
+      # revision of THIS repo, and nothing over there notices when that pin
+      # falls behind — a harness fix can merge here and the gate keeps testing
+      # the version before it, silently and greenly. That is not hypothetical:
+      # it happened the day the gate was built, and a human spotted it only
+      # because an audit went looking.
+      #
+      # This runs last on purpose. It speaks only when the bump is already
+      # known safe, so it can never nag toward a red pairing, and it fails
+      # rather than warns because a warning in a scheduled job is a warning
+      # nobody reads.
+      - name: is provin.oss's pin behind this revision?
+        run: |
+          pinned=$(sed -n 's/^  E2E_REF: *//p' repos/oss/.github/workflows/e2e.yml)
+          current=$(git rev-parse HEAD)
+          if [ -z "$pinned" ]; then
+            echo "could not read E2E_REF from repos/oss/.github/workflows/e2e.yml"
+            exit 1
+          fi
+          if [ "$pinned" = "$current" ]; then
+            echo "provin.oss pins $pinned — current."
+            exit 0
+          fi
+          echo "provin.oss pins   $pinned"
+          echo "this revision is  $current"
+          echo
+          echo "The suites above just passed against oss HEAD at this revision, so the"
+          echo "bump is safe. Set E2E_REF to $current in provin.oss's"
+          echo ".github/workflows/e2e.yml — until then its gate tests an older harness."
+          exit 1
