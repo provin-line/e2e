@@ -236,7 +236,19 @@ func ComposeUp(t *testing.T, scenarioDir string) *Compose {
 	cmd := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "up", "-d")
 	cmd.Dir = c.dir
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("compose up: %v\n%s", err, out)
+		// compose's own output says WHICH service it gave up on and nothing
+		// about why — "container X is unhealthy" reads identically whether the
+		// process crashed on startup, failed its config, or is merely slow. The
+		// containers still exist after a failed `up`, so their logs are right
+		// there; without them a CI failure is a guessing game against a host
+		// nobody can attach to.
+		logs := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "logs", "--no-color", "--tail", "50")
+		logs.Dir = c.dir
+		containerOut, logErr := logs.CombinedOutput()
+		if logErr != nil {
+			containerOut = []byte(fmt.Sprintf("(could not read container logs: %v)", logErr))
+		}
+		t.Fatalf("compose up: %v\n--- compose output ---\n%s\n--- container logs ---\n%s", err, out, containerOut)
 	}
 	return c
 }
