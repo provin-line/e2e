@@ -30,7 +30,7 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: pin
         name: read and validate the oss pin
         run: |
@@ -54,20 +54,26 @@ jobs:
       # nothing user-scoped is involved.
       - id: app-token
         name: mint a scoped token for the oss checkout
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: provin-line
           repositories: oss
+          # `repositories:` narrows WHICH repos, not which rights; without this
+          # the token inherits every permission the installation holds.
+          permission-contents: read
       - name: checkout the pinned oss
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: provin-line/oss
           ref: ${{ steps.pin.outputs.oss_ref }}
           path: repos/oss
           token: ${{ steps.app-token.outputs.token }}
-      - uses: actions/setup-go@v5
+          # Keep the installation token out of the clone's git config, where
+          # every later step in the job could read it.
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
@@ -82,7 +88,7 @@ jobs:
   compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: pin
         name: read and validate the oss pin
         run: |
@@ -94,20 +100,26 @@ jobs:
           echo "oss_ref=$ref" >> "$GITHUB_OUTPUT"
       - id: app-token
         name: mint a scoped token for the oss checkout
-        uses: actions/create-github-app-token@v3
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.CI_APP_ID }}
           private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
           owner: provin-line
           repositories: oss
+          # `repositories:` narrows WHICH repos, not which rights; without this
+          # the token inherits every permission the installation holds.
+          permission-contents: read
       - name: checkout the pinned oss
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: provin-line/oss
           ref: ${{ steps.pin.outputs.oss_ref }}
           path: repos/oss
           token: ${{ steps.app-token.outputs.token }}
-      - uses: actions/setup-go@v5
+          # Keep the installation token out of the clone's git config, where
+          # every later step in the job could read it.
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
