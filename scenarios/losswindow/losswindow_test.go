@@ -36,6 +36,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -104,19 +106,61 @@ func retailLoops(mfgBase string) string {
       }`, lotPipelineDID, mfgBase)
 }
 
-// deliveredHashes parses the retail sink's NDJSON lines into the set of
-// delivered credential hashes.
-func deliveredHashes(lines []string) map[string]bool {
-	out := map[string]bool{}
+// sinkDelivery is the consumer's sink output read two ways. Reconciliation is
+// keyed on the credential's content address; the delivery waits need to know
+// WHICH emission arrived, and only the payload says that.
+//
+// Counting distinct hashes was enough while core NATS was the only transport —
+// at-most-once with no redelivery path makes cardinality and identity the same
+// thing. They stop being the same the moment a redelivery path exists: a late
+// #2 would satisfy a wait meant for #4, and the run would fail much further
+// down as a loss-window mismatch, reporting a delivery bug as a loss-accounting
+// bug (E2E-F-029).
+type sinkDelivery struct {
+	hashes   map[string]bool
+	readings map[int]bool
+}
+
+// parseSink reads the retail sink's NDJSON. Lines without a credential are not
+// sink records — the compose runtime's stream is the container's whole stdout —
+// and a record whose payload carries no numeric reading is skipped rather than
+// fataled, because this runs inside a polling loop where a half-written line is
+// ordinary. Nothing is lost by being lenient here: a reading that never parses
+// never joins the set, and the exact-set assertions below then fail naming it.
+func parseSink(lines []string) sinkDelivery {
+	out := sinkDelivery{hashes: map[string]bool{}, readings: map[int]bool{}}
 	for _, line := range lines {
 		var rec struct {
-			Credential string `json:"credential"`
+			Credential string          `json:"credential"`
+			Payload    json.RawMessage `json:"payload"`
 		}
-		if json.Unmarshal([]byte(line), &rec) == nil && rec.Credential != "" {
-			out[rec.Credential] = true
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.Credential == "" {
+			continue
+		}
+		out.hashes[rec.Credential] = true
+		var payload struct {
+			Reading *int `json:"reading"`
+		}
+		if json.Unmarshal(rec.Payload, &payload) == nil && payload.Reading != nil {
+			out.readings[*payload.Reading] = true
 		}
 	}
 	return out
+}
+
+// readingSet renders a delivered-reading set for comparison and for failure
+// messages — the same string in both, so a mismatch reads directly.
+func readingSet(m map[int]bool) string {
+	ns := make([]int, 0, len(m))
+	for n := range m {
+		ns = append(ns, n)
+	}
+	sort.Ints(ns)
+	parts := make([]string, len(ns))
+	for i, n := range ns {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ",")
 }
 
 // lwEnv is what the scenario body needs from either runtime.
@@ -184,15 +228,31 @@ func TestLossWindow_EmissionLogNamesTheLoss(t *testing.T) {
 	// delivered" check would therefore be satisfied under compose by #1's line
 	// still being there, and would never observe recovery at all.
 	var preStopLines []string
-	delivered := func() map[string]bool {
+	delivered := func() sinkDelivery {
 		// Copy first: appending onto preStopLines directly could write through
 		// its backing array.
 		all := append(append([]string{}, preStopLines...), e.sinkLines()...)
-		return deliveredHashes(all)
+		return parseSink(all)
 	}
-	waitDelivered := func(what string, want int) {
+	// waitDelivered blocks until EXACTLY the named readings have arrived, and
+	// says which ones did if they never do — harness.WaitFor can only report the
+	// label it was handed, and "timed out waiting for #4" is no help when the
+	// interesting fact is that #2 showed up instead.
+	waitDelivered := func(what string, want ...int) {
 		t.Helper()
-		harness.WaitFor(t, what, 30*time.Second, func() bool { return len(delivered()) == want })
+		wantSet := map[int]bool{}
+		for _, n := range want {
+			wantSet[n] = true
+		}
+		wantKey, got := readingSet(wantSet), ""
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			if got = readingSet(delivered().readings); got == wantKey {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		t.Fatalf("%s: delivered readings = {%s}, want {%s}", what, got, wantKey)
 	}
 
 	// --- #1 delivered normally. ---
@@ -211,7 +271,7 @@ func TestLossWindow_EmissionLogNamesTheLoss(t *testing.T) {
 	e.startRetail()
 	e.waitSubscriber(lotPipelineDID)
 	publish(4)
-	waitDelivered("sink delivery #4 after recovery", 2)
+	waitDelivered("sink delivery #4 after recovery", 1, 4)
 
 	// --- Durability + sequence continuity: the PRODUCER restarts too. Its
 	// log must still cover 1..4, and the next emission must carry sequence
@@ -249,7 +309,7 @@ func TestLossWindow_EmissionLogNamesTheLoss(t *testing.T) {
 	// Waiting for the LOG to reach 5 does not mean #5 reached the consumer:
 	// the mirror shipper and NATS delivery are independent async paths, and
 	// reconciling early would count #5 as lost.
-	waitDelivered("sink delivery #5 after producer restart", 3)
+	waitDelivered("sink delivery #5 after producer restart", 1, 4, 5)
 
 	// --- Reconciliation: the signed checkpoint proves how many, the record
 	// range names WHICH sequence numbers were lost. ---
@@ -271,7 +331,7 @@ func TestLossWindow_EmissionLogNamesTheLoss(t *testing.T) {
 	for _, rec := range recs.Msg.GetRecords() {
 		payloads = append(payloads, rec.GetPayload())
 	}
-	recon, err := harness.ReconcileEmissionLog(payloads, delivered())
+	recon, err := harness.ReconcileEmissionLog(payloads, delivered().hashes)
 	if err != nil {
 		t.Fatalf("reconcile emission log: %v", err)
 	}
