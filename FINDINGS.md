@@ -66,9 +66,39 @@ suite.
 
 ## Open findings
 
-### E2E-F-029 — `losswindow`'s delivery waits assert cardinality, not identity
+### E2E-F-030 — the ingest handle cannot be mapped to the head it produced
 
 - **Status**: open
+- **Affected scenario**: `scenarios/httpingest`
+- **Rationale**: `POST /ingest/<loop>/push` answers 202 with a `payload_hash` —
+  the hash of the payload the client sent, equal to the issued credential's
+  input/output hash. It is a correlation handle, not a chain head content
+  address, and **no call maps one to the other**. A client that ingested data
+  and then wants that record's evidence has to enumerate
+  `AuditService.ListAuditStatuses` and work out which entry is its own, which is
+  unambiguous only while the node has issued one head.
+  `scenarios/httpingest` sidesteps this by reading the sink's NDJSON instead,
+  which a real client does not have.
+- **Workaround**: none in the harness, deliberately (AGENTS.md rule 4). The
+  scenario reads downstream over surfaces it legitimately has; building a
+  payload→head correlation into the harness would hide a missing product surface
+  behind test code.
+- **Resolution condition**: a wire surface that resolves an ingest handle to the
+  head it produced — or an explicit product decision that enumeration is the
+  intended contract, in which case this closes as won't-fix and the docs say so.
+- **Provenance**: multi-agent review, 2026-07-25. Surfaced through a real
+  consequence rather than in the abstract: `deploy/quickstart`'s step 2f told
+  readers to pass `payload_hash` to `bundle export --head`, which cannot work.
+  Corrected in oss (`docs/quickstart-head-correlation`) by taking the `headHash`
+  step 2d already prints. That the wrong instruction shipped at all is its own
+  signal — `walkthrough.sh` discards the 202 body and exits before the export
+  step, so the documented path was never executed by anything.
+
+## Closed findings
+
+### E2E-F-029 — `losswindow`'s delivery waits assert cardinality, not identity
+
+- **Status**: resolved
 - **Affected scenario**: `scenarios/losswindow`
 - **Rationale**: `waitDelivered` counts DISTINCT credential hashes, so "sink
   delivery #4 after recovery" is satisfied by any second distinct hash rather
@@ -91,8 +121,19 @@ suite.
   hash set retained for reconciliation.
 - **Provenance**: multi-agent review of the E2E-F-028 slice, 2026-07-25 (raised
   independently of the compose-twin work, on the same scenario).
+- **Resolution evidence**: the sink's NDJSON is now parsed for both the
+  credential hash AND the payload's reading (`sinkDelivery`), and the three waits
+  assert EXACT reading sets — `{1}`, `{1,4}`, `{1,4,5}` — while reconciliation
+  keeps using the hash set. The waits also report what actually arrived on
+  timeout, which `harness.WaitFor` cannot: it only knows the label it was handed,
+  and "timed out waiting for #4" hides the interesting fact that #2 showed up
+  instead.
 
-## Closed findings
+  Verified by mutation, not by the suite going green: expecting `{1,3}` — where
+  #3 is an emission the outage genuinely lost — fails with
+  `delivered readings = {1,4}, want {1,3}`. **The old cardinality check would
+  have passed that mutation**, since `{1,3}` and `{1,4}` are both two elements.
+  That is the gap this finding named, reproduced and closed.
 
 ### E2E-F-028 — `losswindow` has no compose twin
 
@@ -168,7 +209,7 @@ wording the source used where it differs from "resolved".
 | ----------- | --- | ------- | ------ | ---------- |
 | `E2E-F-002` | `#2` | Data sources that speak HTTP but not NATS had no ingestion path; the apipush surface was the follow-up | resolved by the apipush surface, driven by `scenarios/httpingest` | `scenarios/httpingest/httpingest_test.go:3`; commit `4dc3e26` |
 | `E2E-F-012` | `#12` | No per-registry resolution mapping, which blocked per-org signing nodes | lifted once oss shipped per-registry resolution (`registry-base-urls`) | commit `2ebdd45`; the scope note in an earlier commit of the same series |
-| `E2E-F-013` | `#13` | Local-keystore-only signing — no remote SignerService config path | **ambiguous**: `2ebdd45`'s subject calls it lifted (node-local keys suffice for the three-org topology), but a sibling scope still cites it as an undelivered prerequisite for signing delegation. Not closed here on conflicting evidence. | commit `2ebdd45`; `scopes/spec.provin4ai/docs/provin4ai-definition-2026-07-06.md:119` |
+| `E2E-F-013` | `#13` | Local-keystore-only signing blocked per-org signing nodes | resolved **as an e2e finding**: `2ebdd45` shipped three organisations each signing its own hop with node-local keys, so nothing this harness needs is blocked. The remote-signer capability the same number is cited for elsewhere is NOT this finding — see below. | commit `2ebdd45` |
 | `E2E-F-014` | `#14` | A bare NATS account was not connectable until some grant existed | resolved in oss; the harness publishes the bare account's claims | `internal/harness/nats.go:96`; three oss sites (below) |
 | `E2E-F-017` | `#17` | No wire surface for an aggregate's consumed source set; the manifest payload was the only substitute | resolved by `GetConsumedSources` | `scenarios/sensoraggregate/sensoraggregate_test.go:258`; commit `93c9474` |
 | `E2E-F-018` | `#18` | Compose twins deferred for the then-existing scenarios while the compose runtime was pending | resolved — all of them gained twins, "rule 3 satisfied" | opened in commit `2cce17b`, resolved in commit `0937445` |
@@ -180,6 +221,26 @@ wording the source used where it differs from "resolved".
 | `E2E-F-025` | `#25` | The forward direction (a credential's descendants) existed on no API | resolved by `VCResolverService.ListSuccessors` | `scenarios/recall/recall_test.go:8`; commit `93c9474` |
 | `E2E-F-026` | `#26` | Chain heads could only be learned by scraping sink stdout | resolved by `AuditService.ListAuditStatuses` | `scenarios/recall/recall_test.go:9`; commit `93c9474` |
 | `E2E-F-027` | `#27` | At-most-once loss was silent: no durable, signed record of what was emitted | resolved by `dplaax.tlog.v1.TlogService` | `scenarios/losswindow/losswindow_test.go:2`; commit `d8b687f` |
+
+### `#13` was two things, and only one of them was ours
+
+The number was read as a single ambiguous requirement because two artifacts
+disagreed: `2ebdd45`'s subject says "findings #12/#13 lifted", while
+`scopes/spec.provin4ai/docs/provin4ai-definition-2026-07-06.md:119` cites `#13`
+as an undelivered prerequisite. Both are correct about different things.
+
+- **The harness's blocker** — per-org signing nodes needed node-local keys to be
+  workable. That shipped, `supplychain` exercises it, and it is closed above.
+- **A remote SignerService config path** — the capability an optional key-custody
+  / signing-delegation tier would need. That was never a gap this harness hit;
+  no scenario wants it. It is a **product decision**, not an e2e finding, and it
+  is deliberately not tracked here: giving it an `E2E-F-` id would imply this
+  register can close it, which it cannot.
+
+Whether that tier is worth building is open and belongs wherever product scope
+is decided. The sibling scope's citation should eventually point there rather
+than at `#13`; it is left alone for now under the same rule as the other
+external references below.
 
 Two findings from the separated-topology work were recorded in prose without
 numbers and are noted here rather than assigned IDs retroactively: a fresh
@@ -207,7 +268,7 @@ deliberately left alone; they resolve against the table above.
 | `provin.oss` | `network/pkg/services/vcresolver/filestore/filestore.go:3` | `#23` | `E2E-F-023` |
 | `provin.oss` | `network/pkg/services/vcresolver/filestore/backend_test.go:195` | `#23` | `E2E-F-023` |
 | `provin.oss` | `network/pkg/services/auditor/filestore/filestore.go:3` | `#23` | `E2E-F-023` |
-| sibling scope | `scopes/spec.provin4ai/docs/provin4ai-definition-2026-07-06.md:119` | `#13` | `E2E-F-013` |
+| sibling scope | `scopes/spec.provin4ai/docs/provin4ai-definition-2026-07-06.md:119` | `#13` | **not** `E2E-F-013` — it means the remote-signer capability, which is a product question rather than a finding (see above) |
 
 `E2E-F-023` is the one entry with no citation inside this repository at all —
 oss is its only reader, which is exactly why a repository-scoped ID matters.
