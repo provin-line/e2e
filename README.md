@@ -59,13 +59,18 @@ revision of this repo.
 deliberately **not** a gate: a red run there means the pair has drifted, not
 that either side is broken, and which side moves is a human call.
 
-Both cross-repo checkouts mint a short-lived GitHub App installation token,
-scoped to the single repository being read. A workflow's own `GITHUB_TOKEN` is
-scoped to its own repository and cannot read a private sibling, and this
-organisation disables deploy keys by policy — Apps are what it recommends
-instead. Setup is one App plus two settings (`CI_APP_ID` variable,
-`CI_APP_PRIVATE_KEY` secret), which may live at the organisation level and serve
-both repositories at once.
+Both cross-repo checkouts are anonymous — `provin-line/oss` is public, so
+nothing has to be arranged for CI to read it. Until 2026-07-27 they minted a
+short-lived GitHub App installation token, because a workflow's own
+`GITHUB_TOKEN` is scoped to its own repository and cannot read a *private*
+sibling, and this organisation disables deploy keys by policy. Publishing oss
+removed the constraint, and with it the App, the `CI_APP_ID` variable and the
+`CI_APP_PRIVATE_KEY` secret.
+
+The same thing happened in the other direction: `provin.oss`'s gate skipped
+itself on pull requests from forks, because a fork gets no repository secrets
+and so could not check this harness out. That harness is public too now, so
+fork pull requests run the full gate like everyone else's.
 
 ## Structure
 
