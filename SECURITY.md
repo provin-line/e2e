@@ -55,10 +55,24 @@ coordinate disclosure with you.
 
 ## Supported versions
 
-This repository is not versioned: it publishes no releases, tags no versions,
-and ships nothing anyone installs. Only `main` is assessed, and a fix lands as
-an ordinary commit.
+Only the latest minor line is assessed. A fix lands as an ordinary commit on
+`main` and reaches a tag at the next cut; there is no backport line.
 
-The revision of `provin-line/oss` the scenarios are verified against is pinned
-in [`pins.env`](pins.env) as a SHA rather than a branch, so any given commit of
-this repository names exactly what it was green against.
+| Version | Status |
+| --- | --- |
+| `0.1.x` | Supported (current line). |
+| earlier | None exists — `v0.1.0` is the first tag. |
+
+**A version here is a citation, not an install target.** Nothing in this
+repository is published to a registry or imported by anyone, so the tag makes
+no compatibility promise about a Go package surface. What it names is a harness
+revision, which matters because this repository's output is *evidence*: "both
+runtimes green against oss `<sha>`" and the findings in
+[`FINDINGS.md`](FINDINGS.md) are claims about a specific harness, and a claim
+worth making is worth being able to point at.
+
+The gate is unaffected by tags in both directions. `provin.oss` pins this
+repository by **SHA** (`E2E_REF`), and [`pins.env`](pins.env) pins the oss
+revision the scenarios run against by SHA too — both because a moving name
+makes a green run unattributable. Cite the tag when talking to a human; pin the
+SHA when a machine has to reproduce it.
