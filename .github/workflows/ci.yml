@@ -44,34 +44,18 @@ jobs:
             exit 1
           }
           echo "oss_ref=$ref" >> "$GITHUB_OUTPUT"
-      # An installation token from a GitHub App, not a deploy key: the
-      # provin-line organisation disables deploy keys by policy and points at
-      # Apps instead. GITHUB_TOKEN cannot be used either — it is scoped to this
-      # repository and cannot read a private sibling.
-      #
-      # The token is minted per job, expires in an hour, and `repositories:`
-      # narrows it to the one repo this job reads. Nothing long-lived and
-      # nothing user-scoped is involved.
-      - id: app-token
-        name: mint a scoped token for the oss checkout
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: provin-line
-          repositories: oss
-          # `repositories:` narrows WHICH repos, not which rights; without this
-          # the token inherits every permission the installation holds.
-          permission-contents: read
+      # No credential: provin-line/oss is public, so an anonymous checkout
+      # reaches it. This used to mint a GitHub App installation token because
+      # GITHUB_TOKEN is scoped to this repository and could not read a private
+      # sibling; the sibling stopped being private on 2026-07-27.
       - name: checkout the pinned oss
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: provin-line/oss
           ref: ${{ steps.pin.outputs.oss_ref }}
           path: repos/oss
-          token: ${{ steps.app-token.outputs.token }}
-          # Keep the installation token out of the clone's git config, where
-          # every later step in the job could read it.
+          # Still false: checkout defaults to persisting GITHUB_TOKEN in the
+          # clone's git config, and this clone has no use for it.
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -98,26 +82,12 @@ jobs:
             exit 1
           }
           echo "oss_ref=$ref" >> "$GITHUB_OUTPUT"
-      - id: app-token
-        name: mint a scoped token for the oss checkout
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
-          owner: provin-line
-          repositories: oss
-          # `repositories:` narrows WHICH repos, not which rights; without this
-          # the token inherits every permission the installation holds.
-          permission-contents: read
       - name: checkout the pinned oss
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: provin-line/oss
           ref: ${{ steps.pin.outputs.oss_ref }}
           path: repos/oss
-          token: ${{ steps.app-token.outputs.token }}
-          # Keep the installation token out of the clone's git config, where
-          # every later step in the job could read it.
           persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
