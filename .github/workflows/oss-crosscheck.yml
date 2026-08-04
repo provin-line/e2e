@@ -11,6 +11,21 @@
 # The same shape provin.oss's spec-crosscheck.yml uses for the dPLaaX spec:
 # in-tree pin gates, HEAD-watching informs.
 #
+# One pair run, two consumers. A green run here proves BOTH pins can move: this
+# repository's OSS_REF to the oss revision just tested, and provin.oss's
+# E2E_REF to the harness revision just tested. Neither bump happens here —
+# oss-pin-bump.yml fires on this workflow's completion and acts on the first;
+# provin.oss's e2e-pin-bump.yml reads this workflow's run conclusion nightly
+# and acts on the second. The split is load-bearing: both consumers treat this
+# run's conclusion as "did the pair work", so nothing else may contribute to
+# it. A bookkeeping step used to, and the eight consecutive red nights it
+# produced are recorded in oss-pin-bump.yml.
+#
+# The pair artifact below is the contractual channel for "which oss revision
+# did this run actually test". oss-pin-bump.yml must not re-derive it from the
+# API: oss HEAD moves, and a pin bumped to a revision this run never tested
+# would carry evidence for a different pairing than the one it names.
+#
 # Actions here are pinned to commit SHAs. The original reason was that these
 # steps handled a GitHub App private key, which no longer passes through them —
 # provin-line/oss went public on 2026-07-27 and the checkout is anonymous now.
@@ -53,41 +68,21 @@ jobs:
       # tested instead, since that is what a reader of a red run needs first.
       - name: report the pair under test
         run: |
-          echo "pinned oss (what the gate uses): $(sed -n 's/^OSS_REF=//p' pins.env)"
-          echo "oss HEAD (what this run tests):  $(git -C repos/oss rev-parse HEAD)"
+          mkdir -p "$RUNNER_TEMP/pair"
+          git -C repos/oss rev-parse HEAD > "$RUNNER_TEMP/pair/oss_sha"
+          echo "pinned oss (what the gate uses): $(sed -n 's/^OSS_REF=//p' pins.env | head -1)"
+          echo "oss HEAD (what this run tests):  $(cat "$RUNNER_TEMP/pair/oss_sha")"
           echo "e2e revision:                    $(git rev-parse HEAD)"
+      # Uploaded before the suites run, deliberately: the artifact states which
+      # pair was TESTED, not which pair passed — pass/fail is the run's
+      # conclusion, and oss-pin-bump.yml reads both. Uploading first also means
+      # a red run still records what it was red against.
+      - name: record the pair for oss-pin-bump
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pair
+          path: ${{ runner.temp }}/pair/
+          retention-days: 7
       - run: make test
       - run: make docker-build
       - run: make test-compose
-
-      # Only now, with the pair proven green, is it safe to say the counterpart
-      # pin should move. provin.oss gates its own commits against a pinned
-      # revision of THIS repo, and nothing over there notices when that pin
-      # falls behind — a harness fix can merge here and the gate keeps testing
-      # the version before it, silently and greenly. That is not hypothetical:
-      # it happened the day the gate was built, and a human spotted it only
-      # because an audit went looking.
-      #
-      # This runs last on purpose. It speaks only when the bump is already
-      # known safe, so it can never nag toward a red pairing, and it fails
-      # rather than warns because a warning in a scheduled job is a warning
-      # nobody reads.
-      - name: is provin.oss's pin behind this revision?
-        run: |
-          pinned=$(sed -n 's/^  E2E_REF: *//p' repos/oss/.github/workflows/e2e.yml)
-          current=$(git rev-parse HEAD)
-          if [ -z "$pinned" ]; then
-            echo "could not read E2E_REF from repos/oss/.github/workflows/e2e.yml"
-            exit 1
-          fi
-          if [ "$pinned" = "$current" ]; then
-            echo "provin.oss pins $pinned — current."
-            exit 0
-          fi
-          echo "provin.oss pins   $pinned"
-          echo "this revision is  $current"
-          echo
-          echo "The suites above just passed against oss HEAD at this revision, so the"
-          echo "bump is safe. Set E2E_REF to $current in provin.oss's"
-          echo ".github/workflows/e2e.yml — until then its gate tests an older harness."
-          exit 1
