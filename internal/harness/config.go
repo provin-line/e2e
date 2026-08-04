@@ -35,6 +35,10 @@ type NodeConfig struct {
 	// Extra is appended verbatim inside provin.network.pipeline for node-level
 	// tuning overrides (e.g. audit-runner intervals). Optional.
 	Extra string
+	// ChainExtra is appended verbatim inside provin.network.chain, after the
+	// nats block — chain-level posture overrides such as the did-cache block.
+	// Optional.
+	ChainExtra string
 }
 
 // Render produces the application.conf text.
@@ -94,7 +98,11 @@ func (c NodeConfig) Render() string {
 		}
 		b.WriteString("      }\n")
 	}
-	b.WriteString("    }\n  }\n  pipeline {\n")
+	b.WriteString("    }\n")
+	if c.ChainExtra != "" {
+		fmt.Fprintf(&b, "%s\n", c.ChainExtra)
+	}
+	b.WriteString("  }\n  pipeline {\n")
 	if c.VCStoreEndpoint != "" {
 		fmt.Fprintf(&b, "    vc-store-endpoint = %q\n", c.VCStoreEndpoint)
 	}
