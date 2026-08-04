@@ -1,0 +1,388 @@
+# Keeps pins.env's OSS_REF from silently falling behind the product, without
+# ever asking by failing.
+#
+# Successor to a step that lived at the bottom of oss-crosscheck.yml, named
+# "is provin.oss's pin behind this revision?". That step was right about the
+# hazard and wrong about the channel. The hazard is real: a gate can go on
+# silently testing a superseded revision, and nothing notices — it happened the
+# day the gate was built, and a human caught it only because an audit went
+# looking. But it said so by FAILING, and a bookkeeping obligation encoded as a
+# test failure fires on every commit and stays red until someone edits another
+# repository. It first fired the day 0.1.0 landed, against a diff that was
+# CHANGELOG.md and SECURITY.md; eight consecutive red nights later the signal
+# it was drowning out — "the pair actually broke" — was no longer legible.
+#
+# So this is a separate workflow, on purpose, and the separation is the fix as
+# much as the filing is. oss-crosscheck's conclusion means exactly "did the
+# pair work" — provin.oss's e2e-pin-bump.yml gates on it, so a bookkeeping
+# failure that reddened it would not just cry wolf, it would freeze the
+# counterpart's pin. A failure HERE means this machinery is broken, and that is
+# the only thing it can mean.
+#
+# What it does when the pair is green and the pin is behind: prepares the bump
+# on chore/bump-oss-pin and tracks it in an issue that closes itself once
+# pins.env catches up. The issue carries a one-click link that opens the pull
+# request rather than opening one directly, and that is the better half of the
+# trade twice over: provin-line forbids GITHUB_TOKEN from creating pull
+# requests at the organization level, and a pull request opened by GITHUB_TOKEN
+# would not trigger ci.yml. Opened by a human, it does.
+#
+# It does NOT merge. pins.env asks whoever bumps to read what changed first,
+# and that reading is the part worth a human.
+name: oss-pin-bump
+
+on:
+  workflow_run:
+    workflows: [oss-crosscheck]
+    types: [completed]
+  # For rehearsal. On any ref other than the default branch, mutation is
+  # forced off (see DRY_RUN below), so a dispatch against a work branch is
+  # always a dry run regardless of the input.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: report what this would do, without pushing a branch or filing an issue
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# The branch and the issue are shared mutable state; two runs interleaving
+# (a dispatch overlapping the nightly) could double-file the issue or race the
+# push. Queue instead.
+concurrency:
+  group: oss-pin-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    # Fire only when the pair actually worked. A red or cancelled crosscheck
+    # proves nothing about any bump, so this workflow stays silent — which is
+    # also why a workflow_dispatch rehearsal must go find evidence rather than
+    # assume tonight's.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      # To push the bump branch. Note this is the one checkout in this
+      # repository that KEEPS its credential, for exactly that reason.
+      contents: write
+      # To file, refresh and close the tracking issue.
+      issues: write
+      # To read the crosscheck run's pair artifact, and to see whether the
+      # bump branch already has an open pull request.
+      actions: read
+      pull-requests: read
+    env:
+      BRANCH: chore/bump-oss-pin
+      ISSUE_TITLE: 'pins.env: OSS_REF is behind provin-line/oss'
+      ISSUE_LABEL: pin-bump
+      BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+      GH_TOKEN: ${{ github.token }}
+      # Two ways to be a dry run: asked for one, or running anywhere other
+      # than the default branch — a dispatch against a work branch must never
+      # mutate shared state from unreviewed history. workflow_run events
+      # always run on the default branch, and inputs.dry_run is empty there,
+      # so scheduled operation is live.
+      DRY_RUN: ${{ inputs.dry_run == true || github.ref_name != github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history: a push from a shallow clone is refused, and this job
+          # exists to push.
+          fetch-depth: 0
+
+      - id: evidence
+        name: which oss revision did the crosscheck prove, and where?
+        env:
+          EVENT: ${{ github.event_name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -o pipefail
+          # On workflow_run the triggering run is the evidence. On dispatch,
+          # go find the newest successful one — same lookup provin.oss's
+          # e2e-pin-bump.yml performs, for the same reason: rehearsal must not
+          # invent evidence.
+          if [ "$EVENT" = "workflow_run" ]; then
+            run_id="$RUN_ID"
+          else
+            run_id=$(gh api \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/oss-crosscheck.yml/runs?branch=main&status=success&per_page=1" \
+              --jq '.workflow_runs[0].id // empty')
+            if [ -z "$run_id" ]; then
+              echo "no successful oss-crosscheck run exists — nothing is proven yet."
+              echo "found=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          # The pair artifact is the contractual channel for "which oss
+          # revision did that run test" — see oss-crosscheck.yml. Fetched via
+          # the API rather than download-artifact: the action cannot reach
+          # another run's artifacts without a token dance, and a zip is a zip.
+          artifact_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+            --jq '.artifacts[] | select(.name == "pair") | .id' | head -1)
+          if [ -z "$artifact_id" ]; then
+            echo "run $run_id has no pair artifact — it predates the artifact contract. Nothing to act on."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$RUNNER_TEMP/pair.zip"
+          unzip -o -q "$RUNNER_TEMP/pair.zip" -d "$RUNNER_TEMP/pair"
+          target=$(head -1 "$RUNNER_TEMP/pair/oss_sha")
+          printf '%s' "$target" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "the pair artifact names something that is not a commit SHA: '$target'"
+            exit 1
+          }
+          echo "proven green: $target"
+          {
+            echo "found=true"
+            echo "target=$target"
+            echo "evidence=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: decide
+        name: is pins.env behind that revision?
+        if: steps.evidence.outputs.found == 'true'
+        env:
+          TARGET: ${{ steps.evidence.outputs.target }}
+        run: |
+          current=$(sed -n 's/^OSS_REF=//p' pins.env | head -1)
+          # The value reaches a compare URL and, in the bump commit, a future
+          # checkout ref — assert it is a commit id, exactly as ci.yml asserts
+          # before its own checkout. The prose in pins.env promising "a pin is
+          # a SHA" is enforced everywhere the value is consumed, not just where
+          # it is written.
+          printf '%s' "$current" | grep -Eq '^[0-9a-f]{40}$' || {
+            echo "pins.env: OSS_REF must be a full 40-character commit SHA, got '$current'"
+            exit 1
+          }
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "$TARGET" ]; then
+            echo "pins.env names $current — current."
+            echo "behind=false" >> "$GITHUB_OUTPUT"
+            echo "reason=caught-up" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A pin only ever moves forward. "Proven green" is not "newer than
+          # the pin": after a red streak, the newest green run can predate the
+          # pin entirely — on 2026-08-04 the live gap was eight days — and a
+          # revert or rewritten main over there can strand the tested revision
+          # off the branch. Either way, proposing it would quietly move the
+          # gate backwards while looking exactly like progress.
+          status=$(gh api "repos/provin-line/oss/compare/${current}...${TARGET}" --jq .status)
+          if [ "$status" != "ahead" ]; then
+            echo "pins.env names   $current"
+            echo "proven green     $TARGET"
+            echo "compare says the proven revision is '$status' relative to the pin, not 'ahead' — nothing to propose."
+            echo "behind=false" >> "$GITHUB_OUTPUT"
+            echo "reason=not-ahead" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "pins.env names  $current"
+          echo "proven green    $TARGET"
+          echo "behind=true" >> "$GITHUB_OUTPUT"
+
+      - id: branch
+        name: prepare the bump on a branch
+        if: steps.decide.outputs.behind == 'true'
+        env:
+          TARGET: ${{ steps.evidence.outputs.target }}
+          EVIDENCE: ${{ steps.evidence.outputs.evidence }}
+        run: |
+          set -o pipefail
+          # Three reasons to leave the branch alone, checked in order of how
+          # much a force-push would destroy:
+          #
+          # 1. An open pull request. Its reviewer read a specific diff, and its
+          #    title and body name a specific target; force-pushing a newer one
+          #    under them silently converts an approval of X into a merge of Y
+          #    — and a GITHUB_TOKEN push would not even rerun ci.yml on it.
+          # 2. A tip this job did not write. Someone took the branch to fix a
+          #    bump by hand; their work is not this job's to overwrite. The
+          #    committer is checked as well as the author because --amend
+          #    preserves the original author — a hand-amended commit still
+          #    carries the bot's authorship.
+          # 3. A tip that already says what tonight would say.
+          pr=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$pr" ]; then
+            echo "pull request #$pr is open on $BRANCH — leaving it exactly as its reviewer sees it."
+            echo "state=in-review" >> "$GITHUB_OUTPUT"
+            echo "pr=$pr" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          lease="$BRANCH:"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch --quiet origin "$BRANCH"
+            remote_tip=$(git rev-parse FETCH_HEAD)
+            lease="$BRANCH:$remote_tip"
+            author=$(git log -1 --format=%ae FETCH_HEAD)
+            committer=$(git log -1 --format=%ce FETCH_HEAD)
+            if [ "$author" != "$BOT_EMAIL" ] || [ "$committer" != "$BOT_EMAIL" ]; then
+              echo "refusing to overwrite $BRANCH: its tip is by $author/$committer, not this job."
+              echo "state=blocked" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if git show "FETCH_HEAD:pins.env" | grep -q "^OSS_REF=${TARGET}\$"; then
+              echo "$BRANCH already names $TARGET — leaving it alone."
+              echo "state=unchanged" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email "$BOT_EMAIL"
+          # Always from the default branch's tip as checked out by this run —
+          # never from a dispatch ref's history. The DRY_RUN guard makes a
+          # non-default dispatch inert anyway; this is the second lock on the
+          # same door.
+          git checkout --quiet -B "$BRANCH" "$GITHUB_SHA"
+          # Not `sed -i`: that spelling is GNU-only, and the difference does
+          # not surface until someone runs this logic somewhere other than the
+          # hosted Ubuntu runner — where it silently rewrites nothing and the
+          # commit below turns into an empty-tree failure instead of an error
+          # about the thing that actually went wrong.
+          rewritten=$(mktemp)
+          sed "s|^OSS_REF=.*|OSS_REF=${TARGET}|" pins.env > "$rewritten"
+          mv "$rewritten" pins.env
+          grep -q "^OSS_REF=${TARGET}\$" pins.env || {
+            echo "pins.env has no OSS_REF= line to rewrite — has its format changed?"
+            exit 1
+          }
+          git add pins.env
+          git commit --quiet --file - <<MSG
+          pins: move OSS_REF to ${TARGET:0:12} — the nightly pair run proved it green
+
+          oss-crosscheck ran both runtimes against this exact oss revision, with
+          the harness at the revision recorded in the run below, so this bump
+          arrives carrying its own evidence rather than asking someone to
+          reproduce it.
+
+          pins.env also asks whoever bumps to read what changed. That part is
+          still yours; nothing merges this automatically.
+
+          Evidence: ${EVIDENCE}
+          MSG
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry run: would push $BRANCH (lease: $lease)"
+            git --no-pager show --stat HEAD
+            echo "state=dry-run" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The lease pins the push to the tip the ownership check above
+          # actually read. If anything moved the branch in between, the push
+          # fails instead of overwriting what it never inspected.
+          git push --quiet --force-with-lease="$lease" origin "$BRANCH"
+          echo "state=pushed" >> "$GITHUB_OUTPUT"
+
+      - name: file or refresh the tracking issue
+        if: steps.decide.outputs.behind == 'true'
+        env:
+          TARGET: ${{ steps.evidence.outputs.target }}
+          EVIDENCE: ${{ steps.evidence.outputs.evidence }}
+          CURRENT: ${{ steps.decide.outputs.current }}
+          BRANCH_STATE: ${{ steps.branch.outputs.state }}
+          PR_NUMBER: ${{ steps.branch.outputs.pr }}
+        run: |
+          set -o pipefail
+          compare="$GITHUB_SERVER_URL/provin-line/oss/compare/${CURRENT}...${TARGET}"
+          branch_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/tree/$BRANCH"
+
+          # A compare link with quick_pull=1 lands on the pull request form
+          # with the title and body already filled in, so "open it" stays one
+          # click even though this job is not the one opening it.
+          pr_title="pins: move OSS_REF to ${TARGET:0:12}"
+          pr_body=$(printf '%s\n\n%s\n' \
+            "Proven green by [oss-crosscheck]($EVIDENCE), which ran both runtimes against this oss revision." \
+            "Read [what changed in oss]($compare) before merging.")
+          quick_pull="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/main...${BRANCH}?quick_pull=1"
+          quick_pull="${quick_pull}&title=$(printf '%s' "$pr_title" | jq -sRr @uri)"
+          quick_pull="${quick_pull}&body=$(printf '%s' "$pr_body" | jq -sRr @uri)"
+
+          {
+            cat <<HEAD
+          \`pins.env\` names an oss revision older than one the nightly pair run has proven green. Until it moves, \`ci.yml\` keeps gating this harness against the older product — greenly, and without saying so.
+
+          | | |
+          |---|---|
+          | \`pins.env\` names | \`${CURRENT}\` |
+          | proven green | \`${TARGET}\` |
+          | evidence | [oss-crosscheck run](${EVIDENCE}) |
+          | oss diff | [\`${CURRENT:0:12}...${TARGET:0:12}\`](${compare}) |
+
+          HEAD
+            case "$BRANCH_STATE" in
+              in-review)
+                cat <<INREVIEW
+          Pull request #${PR_NUMBER} is already open from \`${BRANCH}\` and was deliberately **not** touched — its reviewer is reading a specific diff. A newer proven revision exists; it will be proposed after that pull request is resolved.
+          INREVIEW
+                ;;
+              blocked)
+                cat <<BLOCKED
+          **The branch \`${BRANCH}\` is held by someone else**, so this bump was not prepared — its tip was not written by this job. Resolve that branch and the next nightly run takes it from there.
+          BLOCKED
+                ;;
+              *)
+                cat <<READY
+          The branch [\`${BRANCH}\`](${branch_url}) already carries the edit.
+
+          **[→ open the bump pull request](${quick_pull})**
+
+          \`ci.yml\` runs on that pull request and re-verifies the pin from scratch.
+          READY
+                ;;
+            esac
+            cat <<FOOT
+
+          Read the oss diff before merging — that reading is why this is not merged automatically.
+
+          <sub>Filed and refreshed by \`oss-pin-bump.yml\`. It closes itself once \`pins.env\` catches up.</sub>
+          FOOT
+          } > "$RUNNER_TEMP/issue-body.md"
+
+          number=$(gh issue list --state open --label "$ISSUE_LABEL" --limit 20 --json number,title \
+            | jq -r --arg t "$ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -1)
+
+          if [ "$DRY_RUN" = "true" ]; then
+            if [ -n "$number" ]; then
+              echo "dry run: would refresh issue #$number"
+            else
+              echo "dry run: would file a new issue"
+            fi
+            cat "$RUNNER_TEMP/issue-body.md"
+            exit 0
+          fi
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file "$RUNNER_TEMP/issue-body.md"
+          else
+            gh label create "$ISSUE_LABEL" --description "filed by pin-bump automation" --force
+            gh issue create --title "$ISSUE_TITLE" --label "$ISSUE_LABEL" --body-file "$RUNNER_TEMP/issue-body.md"
+          fi
+
+      - name: close the tracking issue once there is nothing left to bump
+        if: steps.decide.outputs.behind == 'false'
+        env:
+          TARGET: ${{ steps.evidence.outputs.target }}
+          CURRENT: ${{ steps.decide.outputs.current }}
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          set -o pipefail
+          number=$(gh issue list --state open --label "$ISSUE_LABEL" --limit 20 --json number,title \
+            | jq -r --arg t "$ISSUE_TITLE" '.[] | select(.title == $t) | .number' | head -1)
+          [ -n "$number" ] || exit 0
+          # Two distinct ways to have nothing to bump, and the closing comment
+          # is a permanent record, so it must not claim the wrong one.
+          if [ "$REASON" = "caught-up" ]; then
+            comment="\`pins.env\` now names \`${TARGET}\`. Nothing left to bump."
+          else
+            comment="Nothing left to bump: \`pins.env\` names \`${CURRENT}\`, and the newest proven revision (\`${TARGET}\`) is not ahead of it."
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "dry run: would close issue #$number: $comment"
+            exit 0
+          fi
+          gh issue close "$number" --comment "$comment"

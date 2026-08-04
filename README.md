@@ -59,6 +59,14 @@ revision of this repo.
 deliberately **not** a gate: a red run there means the pair has drifted, not
 that either side is broken, and which side moves is a human call.
 
+That nightly pair run is also what keeps both pins honest. A green one proves
+two bumps at once — this repository's `OSS_REF` to the oss revision just tested,
+and `provin.oss`'s `E2E_REF` to the harness revision just tested — so each side
+has a separate workflow (`oss-pin-bump.yml` here, `e2e-pin-bump.yml` there) that
+prepares its own bump on a branch and files an issue linking the run that proved
+it. Neither side asks by failing; the pull request is opened by a human, which
+is also what makes `ci.yml` run on it.
+
 Both cross-repo checkouts are anonymous — `provin-line/oss` is public, so
 nothing has to be arranged for CI to read it. Until 2026-07-27 they minted a
 short-lived GitHub App installation token, because a workflow's own
@@ -94,7 +102,7 @@ e2e/
 ├── internal/harness/      ← provisioning + node lifecycle + assertion helpers
 ├── FINDINGS.md            ← the findings register (AGENTS.md rules 3 and 4)
 ├── pins.env               ← the oss revision the suites are verified against
-├── .github/workflows/     ← ci (pinned, gating) + oss-crosscheck (HEAD, advisory)
+├── .github/workflows/     ← ci (pinned, gating) + oss-crosscheck (HEAD, advisory) + oss-pin-bump
 └── Makefile
 ```
 
