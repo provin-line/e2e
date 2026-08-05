@@ -276,6 +276,16 @@ func ComposeUp(t *testing.T, scenarioDir string) *Compose {
 	t.Cleanup(func() { down(t.Logf) })
 	cmd := exec.Command("docker", "compose", "-p", c.Project, "-f", c.File, "up", "-d")
 	cmd.Dir = c.dir
+	// Services that bind-mount a writable host directory (retail-pipeline's
+	// /app/data) run as the invoking user, so files the container writes are
+	// owned — and mode-0600-checkable — by the test itself on Linux hosts,
+	// where the image's fixed UID cannot write into a runner-owned mount.
+	// macOS file sharing masks the UID mismatch; CI does not.
+	if uid := os.Getuid(); uid >= 0 {
+		cmd.Env = append(os.Environ(),
+			"E2E_UID="+strconv.Itoa(uid),
+			"E2E_GID="+strconv.Itoa(os.Getgid()))
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// compose's own output says WHICH service it gave up on and nothing
 		// about why — "container X is unhealthy" reads identically whether the
