@@ -13,6 +13,26 @@ something to point at. See [SECURITY.md](SECURITY.md#supported-versions).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-05
+
+The Paper 04 measurement line: the supply-chain scenario's acceptance
+became exact, and `longchain` gained a number for the steady state (the
+paper's §6.8.8 revision `a9600f4` is an ancestor of this tag).
+
+### Added
+
+- Supply-chain: exact-view delivery across three organizations with their
+  own registries — a strict source-set profile beside the linear one, and
+  host-readable agent-delivery records asserted from the test.
+- `longchain`: depth- and rate-parameterized steady-state measurement
+  under constant open-loop load.
+
+### Fixed
+
+- `retail-pipeline` runs as the invoking user for its writable `/app/data`
+  bind mount, so container-written 0600 delivery files stay readable — and
+  mode-checkable — by the host-side test on Linux.
+
 ## [0.1.0] - 2026-07-27
 
 The first tag, cut the day the repository went public. Everything below already
