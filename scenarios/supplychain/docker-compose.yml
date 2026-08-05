@@ -154,6 +154,10 @@ services:
 
   retail-pipeline:
     image: provin-line/pipeline:local
+    # Writable /app/data bind mount: run as the invoking user (default: the
+    # image's own UID) so container-written delivery files are owned by the
+    # host-side test — see harness.ComposeUp, which sets E2E_UID/E2E_GID.
+    user: "${E2E_UID:-10001}:${E2E_GID:-10001}"
     environment:
       CONFIG_FILE: /app/config/application.conf
     restart: on-failure
@@ -161,7 +165,7 @@ services:
       - "8443"
     volumes:
       - ./testdata/retail-pipeline/config:/app/config:ro
-      - ./testdata/retail-pipeline/data/keys:/app/data/keys:ro
+      - ./testdata/retail-pipeline/data:/app/data
       - ./testdata/retailer-account.seed:/app/secrets/retailer-account.seed:ro
       - ./testdata/operator.seed:/app/secrets/operator.seed:ro
       - ./testdata/jwts:/app/jwts

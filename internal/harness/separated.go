@@ -55,6 +55,12 @@ type SeparatedConfig struct {
 	// cmd/network ever runs those two background runners (main.go), so this
 	// belongs on the network side, not the pipeline side.
 	Tunables string
+	// ChainExtra is appended verbatim inside provin.network.chain on BOTH
+	// sides (see NodeConfig.ChainExtra): chain-level posture such as the
+	// did-cache block applies to every resolver consumer, and the two
+	// binaries each construct their own (cmd/network via netcompose,
+	// cmd/pipeline via its wiring mirror), so the block must reach both.
+	ChainExtra string
 
 	AllowLoopback        bool
 	AllowPrivateNetworks bool
@@ -123,6 +129,8 @@ func SplitNodeConfig(c SeparatedConfig) (networkCfg, pipelineCfg string) {
 		ResolverBaseURL:      c.ResolverBaseURL,
 		RegistryBaseURLs:     c.RegistryBaseURLs,
 	}
+
+	base.ChainExtra = c.ChainExtra
 
 	network := base
 	network.ListenAddr = c.NetworkListenAddr

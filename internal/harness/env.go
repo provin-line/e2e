@@ -82,6 +82,9 @@ type SingleNodeSpec struct {
 	// Tunables is appended as node-level pipeline config (batch-resolver /
 	// audit-runner intervals). Empty = reference.conf defaults.
 	Tunables string
+	// ChainTunables is appended inside provin.network.chain on both binaries
+	// (e.g. the did-cache block). Empty = reference.conf defaults.
+	ChainTunables string
 	// IngressSubjects are the raw-ingest subjects the scenario publishes to.
 	// StartSingleNode blocks until each has a subscriber, so a stimulus cannot
 	// be published before the node's loops subscribed (plain-subject publishes
@@ -162,6 +165,7 @@ func startSingleNodeProcess(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 		AllowLoopback:      true,
 		LoopsBlock:         spec.Loops(networkBaseURL),
 		Tunables:           spec.Tunables,
+		ChainExtra:         spec.ChainTunables,
 	})
 
 	startBoth := func() *SeparatedNode {
@@ -274,6 +278,7 @@ func startSingleNodeCompose(t *testing.T, spec SingleNodeSpec) SingleNodeEnv {
 		AllowPrivateNetworks: true,
 		LoopsBlock:           spec.Loops(networkSelfBase),
 		Tunables:             spec.Tunables,
+		ChainExtra:           spec.ChainTunables,
 	})
 	prov.WriteNodeConfig(t, networkService, networkCfg)
 	prov.WriteNodeConfig(t, pipelineService, pipelineCfg)
