@@ -5,7 +5,7 @@ OSS_DIR   := $(REPOS_DIR)/oss
 OSS_REPO  := git@github.com:provin-line/oss.git
 OSS_REF   := $(shell sed -n 's/^OSS_REF=//p' pins.env)
 
-.PHONY: clone checkout-oss verify-pin require-oss docker-build test test-simple test-compose
+.PHONY: clone checkout-oss verify-pin require-oss docker-build test test-simple test-compose demo
 
 ## Clone repos/oss at the pinned revision (pins.env) if it is ABSENT.
 ##
@@ -96,3 +96,47 @@ test-simple: require-oss
 ## ./... for the same reason `test` uses it.
 test-compose: require-oss
 	E2E_RUNTIME=compose go test -p 1 ./... -count=1 -timeout 40m
+
+## Image tags docker-build produces — gates whether `demo` needs to build
+## them, so a fresh clone's first `make demo` still works as ONE command
+## while a repeat run does not pay docker-build's cost again.
+DEMO_IMAGES := provin-line/network:local provin-line/pipeline:local provin-line/pdpstub:local
+
+## demo: narrates scenarios/supplychain's tamper arc end to end against the
+## real compose stack — THIS OUTPUT IS THE PRODUCT (provin.dev's landing
+## page), not a test log. A stranger's only prerequisite is Docker: `demo`
+## fails closed with a one-line explanation if it is not usable, otherwise
+## self-provisions everything else — `clone` (a no-op if repos/oss is
+## already there; never silently moves an EXISTING checkout, same as every
+## other target's relationship to it) and docker-build (built automatically
+## the first time any DEMO_IMAGES tag is missing, skipped once they exist) —
+## so `git clone` this repo + `make demo` is the whole onboarding.
+##
+## scenarios/supplychain/demo_test.go carries a `//go:build demo` tag, so it
+## is invisible to `go build ./...` / `go vet ./...` / plain `go test ./...`
+## by construction — it never enters `test`/`test-compose`'s CI gates. This
+## target compiles it as its own test binary and runs that binary directly
+## (not through the `go test` command), so stdout carries only the demo's own
+## narration plus the testing package's unavoidable trailing "PASS" line,
+## which the pipefail'd `bash -c` below strips — and still fails the target
+## (nonzero exit under pipefail) if the run itself failed.
+demo:
+	@command -v docker >/dev/null 2>&1 || { echo "demo: docker is required (not found on PATH)"; exit 1; }
+	@docker info >/dev/null 2>&1 || { echo "demo: docker is installed but its daemon is not reachable — is Docker running?"; exit 1; }
+	@$(MAKE) -s clone
+	@missing=0; \
+	for img in $(DEMO_IMAGES); do \
+		docker image inspect $$img >/dev/null 2>&1 || missing=1; \
+	done; \
+	if [ "$$missing" = "1" ]; then \
+		echo "demo: a pinned-oss image is missing locally — building it first (make docker-build) ..."; \
+		$(MAKE) docker-build; \
+	fi
+	@mkdir -p .tmp
+	@go test -tags demo -c -o .tmp/demo.test ./scenarios/supplychain
+	@# cd into the scenario dir first: setupCompose derives the compose
+	@# project from os.Getwd(), which `go test` normally sets for you by
+	@# running the compiled binary from its own package directory — running
+	@# the binary directly (so its stdout stays free of go test's own
+	@# scaffolding) means this target has to do that part itself.
+	@bash -o pipefail -c 'cd scenarios/supplychain && E2E_RUNTIME=compose $(CURDIR)/.tmp/demo.test -test.run "^TestDemo$$" -test.timeout 5m | grep -v "^PASS$$"'
