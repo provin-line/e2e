@@ -4,6 +4,31 @@ End-to-end tests for the provin OSS components: black-box scenarios that run the
 real `network` + `pipeline` binaries against a real NATS server and assert over
 the wire.
 
+## Tamper demo (3 minutes)
+
+```bash
+git clone https://github.com/provin-line/e2e.git && cd e2e && make demo
+```
+
+Three organizations — manufacturer, distributor, retailer, each with its own
+registry — boot as six real containers over a real NATS broker. The
+manufacturer ingests a lot; the distributor transforms it; the retailer
+verifies the chain and accepts. An adversary republishes the manufacturer's
+own signed envelope with the payload swapped; the chain halts it before it
+reaches the retailer, because the signature no longer matches. The exported
+evidence bundle then re-verifies with no network at all. Real DIDs, real
+signatures, real containers — the terminal output is a transcript of what
+actually happened on this run, not a script. `make demo` builds what it needs
+the first time (a few minutes); after that it runs in well under three.
+
+That's one arc, narrated. The scenario it narrates —
+`scenarios/supplychain/supplychain_test.go` — is the assertion-grade version:
+cross-org DID resolution across all three registries, a stricter policy
+quarantining the same occurrence under a tighter scope, the full wire chain
+walk, and an eavesdropper account proving cross-org grants (not blanket
+access) are what isolates the organizations. Read that if you want to know
+exactly what "verifies the chain" and "halts" check.
+
 ## Runtimes
 
 Every scenario runs in one of two equivalent runtimes:
