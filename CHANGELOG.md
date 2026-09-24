@@ -13,6 +13,17 @@ something to point at. See [SECURITY.md](SECURITY.md#supported-versions).
 
 ## [Unreleased]
 
+### Changed
+
+- The module graph follows provin.oss's dependency refresh
+  (provin-line/oss#83): `o3co/protobuf.interceptors` v0.3.0,
+  `connectrpc.com/connect` 1.21.0, `nats.go` 1.53.1, `o3co/go.hocon` 1.13.0,
+  `golang.org/x/crypto` 0.55.0, `golang.org/x/sys` 0.47.0, and their
+  indirect updates. Only `go.mod` / `go.sum` change: the harness builds the
+  oss checkout it is pointed at through a `replace`, so its own requirement
+  list has to be at least that checkout's, or `go test` stops with "updates
+  to go.mod needed". The Go floor stays 1.25.5.
+
 ## [0.2.0] - 2026-08-05
 
 The Paper 04 measurement line: the supply-chain scenario's acceptance
