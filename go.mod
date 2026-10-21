@@ -9,6 +9,7 @@ require (
 	github.com/nats-io/jwt/v2 v2.8.2
 	github.com/nats-io/nats-server/v2 v2.14.3
 	github.com/nats-io/nkeys v0.4.16
+	github.com/o3co/protobuf.interceptors v0.6.0
 	github.com/provin-line/oss v0.0.0-00010101000000-000000000000
 )
 
@@ -21,7 +22,6 @@ require (
 	github.com/nats-io/nats.go v1.53.1 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/o3co/go.hocon v1.13.0 // indirect
-	github.com/o3co/protobuf.interceptors v0.6.0 // indirect
 	github.com/piprate/json-gold v0.8.0 // indirect
 	github.com/pquerna/cachecontrol v0.2.0 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
