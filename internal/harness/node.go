@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/provin-line/e2e/internal/pdpstub"
 )
 
 // BuildBinaries compiles cmd/network (control plane) and cmd/pipeline (data
@@ -266,10 +268,7 @@ func WaitFor(t *testing.T, what string, timeout time.Duration, fn func() bool) {
 // lifetime of the test (the process-runtime twin of cmd/pdpstub).
 func StartPDPStub(t *testing.T, addr string) (baseURL string) {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /verify", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{Addr: addr, Handler: pdpstub.Handler()}
 	serveErr := &LogBuffer{}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
