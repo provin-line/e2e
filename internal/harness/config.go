@@ -2,6 +2,9 @@ package harness
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 )
@@ -54,6 +57,29 @@ func (c NodeConfig) serviceEndpointsBlock() string {
 	return fmt.Sprintf("    service-endpoints {\n      vc-resolver { type = \"VCResolver\", url = %q }\n    }\n", c.VCStoreEndpoint)
 }
 
+// plainInternalLine lets the node reach a PDP over plain http at a
+// non-loopback host — the compose runtime's pdpstub service — by naming its
+// host:port in provin.network.auth.plain-internal. A loopback PDP (the process
+// runtime) needs no entry, and an https or unparsable URL gets none.
+func (c NodeConfig) plainInternalLine() string {
+	u, err := url.Parse(c.PDPBaseURL)
+	if err != nil || u.Scheme != "http" || u.Hostname() == "" {
+		return ""
+	}
+	host := u.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return ""
+	}
+	if addr, err := netip.ParseAddr(host); err == nil && addr.IsLoopback() {
+		return ""
+	}
+	port := u.Port()
+	if port == "" {
+		port = "80"
+	}
+	return fmt.Sprintf("  auth.plain-internal = [%q]\n", net.JoinHostPort(host, port))
+}
+
 func (c NodeConfig) Render() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `provin.network {
@@ -71,7 +97,7 @@ func (c NodeConfig) Render() string {
     tls.allow-cleartext = true
   }
   auth.policy-verifier-url = %q
-  registry {
+%s  registry {
     id = %q
 %s  }
   chain {
@@ -83,7 +109,7 @@ func (c NodeConfig) Render() string {
       resolver-dir         = %q
       node-did             = %q
       resolver-base-url    = %q
-`, c.ListenAddr, c.AllowLoopback, c.AllowPrivateNetworks, c.PDPBaseURL, c.RegistryID,
+`, c.ListenAddr, c.AllowLoopback, c.AllowPrivateNetworks, c.PDPBaseURL, c.plainInternalLine(), c.RegistryID,
 		c.serviceEndpointsBlock(),
 		c.NATSURL, c.AccountSeedFile, c.TrustSeedFile, c.ResolverDir, c.NodeDID, c.ResolverBaseURL)
 	if len(c.RegistryBaseURLs) > 0 {
