@@ -44,8 +44,13 @@ Every scenario runs in one of two equivalent runtimes:
   one stops doing so without an open finding recording why.
 
 Each node boots with its production fail-closed auth wiring intact, but the PDP
-behind it is `cmd/pdpstub` (allow-all) and the bearer is a fixed harness
-constant: what these scenarios cover is the node's own credential gate and its
+behind it is the allow-all stub of `internal/pdpstub` (served by `cmd/pdpstub`
+in compose, by `harness.StartPDPStub` in process mode) and the bearer is a
+fixed harness constant. The stub answers every `/verify` with a whole allow
+decision envelope, the only allow `o3co/protobuf.interceptors` accepts; the
+compose configs name the stub's `host:port` in
+`provin.network.auth.plain-internal`, since the interceptors refuse plain http
+to a non-loopback host otherwise: what these scenarios cover is the node's own credential gate and its
 wireauth-signed peer calls, never JWT issuance or a policy-decision deny. The
 real three-layer auth stack (auth.provider + o3co policy-verifier) is exercised
 by `repos/oss`'s `deploy/quickstart`, not from here.
@@ -123,7 +128,8 @@ e2e/
 │   ├── auditsurvival/     ← restart: identity AND evidence survive (flipped canary)
 │   ├── archiveverify/     ← offline chain re-verification after infra death
 │   └── aggregatebundle/   ← aggregate-complete bundle: source commitment travels
-├── cmd/pdpstub/           ← allow-all policy-verifier (PDP) stub for scenarios
+├── cmd/pdpstub/           ← the PDP stub's container command
+├── internal/pdpstub/      ← allow-all policy-verifier (PDP) stub: the decision envelope
 ├── internal/harness/      ← provisioning + node lifecycle + assertion helpers
 ├── FINDINGS.md            ← the findings register (AGENTS.md rules 3 and 4)
 ├── pins.env               ← the oss revision the suites are verified against
