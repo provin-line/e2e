@@ -24,7 +24,7 @@ require (
 	github.com/o3co/go.hocon v1.13.0 // indirect
 	github.com/piprate/json-gold v0.8.0 // indirect
 	github.com/pquerna/cachecontrol v0.2.0 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
