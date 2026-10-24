@@ -6,6 +6,7 @@ WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download || true
 COPY cmd/pdpstub cmd/pdpstub
+COPY internal/pdpstub internal/pdpstub
 RUN CGO_ENABLED=0 go build -trimpath -o /out/pdpstub ./cmd/pdpstub
 
 FROM alpine:3.22
