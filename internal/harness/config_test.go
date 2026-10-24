@@ -1,46 +1,62 @@
 package harness
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/provin-line/oss/hoconconfig"
 )
 
-// networkBlock returns the body of the rendered `provin.network { … }` block,
-// where provin.oss reads provin.network.auth.*.
-func networkBlock(t *testing.T, rendered string) string {
+const plainInternalKey = "provin.network.auth.plain-internal"
+
+// loadRendered reads a rendered node config with provin.oss's own loader, so
+// the assertions hold at the path provin.oss reads, not at a text position.
+func loadRendered(t *testing.T, rendered string) *hoconconfig.Config {
 	t.Helper()
-	const open = "provin.network {"
-	start := strings.Index(rendered, open)
-	if start < 0 {
-		t.Fatalf("no %q in:\n%s", open, rendered)
+	path := filepath.Join(t.TempDir(), "application.conf")
+	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	depth := 0
-	for i := start + len(open) - 1; i < len(rendered); i++ {
-		switch rendered[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return rendered[start+len(open) : i]
-			}
-		}
+	t.Setenv("E2E_RENDERED_CONFIG", path)
+	cfg, err := hoconconfig.LoadFile("E2E_RENDERED_CONFIG")
+	if err != nil {
+		t.Fatalf("load rendered config: %v\n%s", err, rendered)
 	}
-	t.Fatalf("unclosed %q in:\n%s", open, rendered)
-	return ""
+	return cfg
+}
+
+func assertPlainInternal(t *testing.T, name, rendered string, want []string) {
+	t.Helper()
+	got, err := loadRendered(t, rendered).StringList(plainInternalKey)
+	if err != nil {
+		t.Fatalf("%s: %s: %v\n%s", name, plainInternalKey, err, rendered)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s: %s = %q, want %q", name, plainInternalKey, got, want)
+	}
 }
 
 func TestRenderAllowsPlainHTTPToAComposePDP(t *testing.T) {
-	block := networkBlock(t, NodeConfig{PDPBaseURL: "http://pdpstub:9091"}.Render())
-	if !strings.Contains(block, `auth.plain-internal = ["pdpstub:9091"]`) {
-		t.Fatalf("provin.network block lacks the plain-internal entry:\n%s", block)
-	}
+	assertPlainInternal(t, "node", NodeConfig{PDPBaseURL: "http://pdpstub:9091"}.Render(), []string{"pdpstub:9091"})
 }
 
 func TestRenderDefaultsThePort(t *testing.T) {
-	block := networkBlock(t, NodeConfig{PDPBaseURL: "http://pdp"}.Render())
-	if !strings.Contains(block, `auth.plain-internal = ["pdp:80"]`) {
-		t.Fatalf("provin.network block lacks pdp:80:\n%s", block)
+	assertPlainInternal(t, "node", NodeConfig{PDPBaseURL: "http://pdp"}.Render(), []string{"pdp:80"})
+}
+
+func TestSplitNodeConfig_PlainInternalReachesBothBinaries(t *testing.T) {
+	networkCfg, pipelineCfg := SplitNodeConfig(SeparatedConfig{
+		NetworkListenAddr:  ":8443",
+		PipelineListenAddr: ":8444",
+		RegistryID:         "reg.example",
+		ResolverBaseURL:    "http://127.0.0.1:8443",
+		PDPBaseURL:         "http://pdpstub:9091",
+	})
+	for name, cfg := range map[string]string{"network": networkCfg, "pipeline": pipelineCfg} {
+		assertPlainInternal(t, name, cfg, []string{"pdpstub:9091"})
 	}
 }
 
