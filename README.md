@@ -46,14 +46,17 @@ Every scenario runs in one of two equivalent runtimes:
 Each node boots with its production fail-closed auth wiring intact, but the PDP
 behind it is the allow-all stub of `internal/pdpstub` (served by `cmd/pdpstub`
 in compose, by `harness.StartPDPStub` in process mode) and the bearer is a
-fixed harness constant. The stub answers every `/verify` with a whole allow
-decision envelope, the only allow `o3co/protobuf.interceptors` accepts; the
-compose configs name the stub's `host:port` in
-`provin.network.auth.plain-internal`, since the interceptors refuse plain http
-to a non-loopback host otherwise: what these scenarios cover is the node's own credential gate and its
-wireauth-signed peer calls, never JWT issuance or a policy-decision deny. The
-real three-layer auth stack (auth.provider + o3co policy-verifier) is exercised
-by `repos/oss`'s `deploy/quickstart`, not from here.
+fixed harness constant: what these scenarios cover is the node's own credential
+gate and its wireauth-signed peer calls, never JWT issuance or a
+policy-decision deny. The real three-layer auth stack (auth.provider + o3co
+policy-verifier) is exercised by `repos/oss`'s `deploy/quickstart`, not from
+here.
+
+The stub answers every well-formed `/verify` with a whole allow decision
+envelope, the only allow `o3co/protobuf.interceptors` accepts. The compose
+configs name the stub's `host:port` in `provin.network.auth.plain-internal`,
+because the interceptors refuse plain http to a non-loopback host otherwise.
+The process runtime reaches the stub on loopback and writes no entry.
 
 ## The oss revision under test
 

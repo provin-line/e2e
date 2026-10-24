@@ -25,21 +25,22 @@ something to point at. See [SECURITY.md](SECURITY.md#supported-versions).
   to go.mod needed".
 - The module floor rises to Go 1.26 and `o3co/protobuf.interceptors` v0.6.0,
   ahead of provin.oss's move to v0.6.0 (root contract
-  `e2e-harness-module-floor`: the harness rises first). The oss binaries and
-  images the runtimes start still build from the pinned checkout's own
-  `go.mod`.
+  `e2e-harness-module-floor`: the harness rises first). The interceptors are
+  now a direct requirement: the stub's test drives the real
+  `NewO3coEndpoint` client against the stub. The oss binaries and images the
+  runtimes start still build from the pinned checkout's own `go.mod`.
 - The PDP stub (`internal/pdpstub`, served by `cmd/pdpstub` and
   `harness.StartPDPStub`) answers a whole allow decision envelope
   (`{resource, action, decision: "allow", reason: {groups: []}}`). The
-  interceptors take nothing less as an allow from v0.4.0 on; an empty 200 is
+  interceptors take nothing less as an allow from v0.5.0 on; an empty 200 is
   refused.
 
 ### Added
 
 - Compose node configs name the PDP stub in
   `provin.network.auth.plain-internal = ["pdpstub:9091"]`, the key provin.oss
-  reads to allow plain http to a listed private host. A provin.oss that does
-  not read it yet ignores it.
+  will read to allow plain http to a listed private host. A provin.oss that
+  does not read it yet ignores it.
 
 ## [0.2.0] - 2026-08-05
 
