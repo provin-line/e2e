@@ -45,6 +45,10 @@ type SeparatedConfig struct {
 	NodeDID          string
 	ResolverBaseURL  string
 	RegistryBaseURLs map[string]string
+	// CredentialOrigins (see NodeConfig.CredentialOrigins) reaches BOTH
+	// sides: cmd/network's batch resolver fetches predecessors from peers,
+	// and cmd/pipeline reads the same pipeline block.
+	CredentialOrigins []string
 
 	// LoopsBlock is the pipeline.loops body (see NodeConfig.LoopsBlock) — the
 	// data-plane topology, which now lives ONLY in the pipeline config
@@ -128,6 +132,7 @@ func SplitNodeConfig(c SeparatedConfig) (networkCfg, pipelineCfg string) {
 		NodeDID:              c.NodeDID,
 		ResolverBaseURL:      c.ResolverBaseURL,
 		RegistryBaseURLs:     c.RegistryBaseURLs,
+		CredentialOrigins:    c.CredentialOrigins,
 	}
 
 	base.ChainExtra = c.ChainExtra
