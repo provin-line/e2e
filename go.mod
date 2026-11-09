@@ -11,6 +11,7 @@ require (
 	github.com/nats-io/nkeys v0.4.16
 	github.com/o3co/protobuf.interceptors v0.6.0
 	github.com/provin-line/oss v0.0.0-00010101000000-000000000000
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -27,5 +28,4 @@ require (
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
-	google.golang.org/protobuf v1.36.12 // indirect
 )
