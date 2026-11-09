@@ -15,6 +15,24 @@ something to point at. See [SECURITY.md](SECURITY.md#supported-versions).
 
 ### Changed
 
+- The supplychain scenario's payload-substitution probe (and the demo's)
+  tampers the captured envelope as the `dplaax.pipeline.v1` `Envelope`
+  message, through `google.golang.org/protobuf` (now a direct requirement),
+  instead of decoding and re-encoding it through oss's `envelopecodec`. The
+  probe is an adversary on the transport, so the wire message is what it
+  touches; and it no longer depends on the codec's constructor, which
+  provin.oss 0.4.0 changes to take bounds. The probe also requires what it
+  captured to be a signed envelope (a credential and a sequence number),
+  so it cannot pass vacuously.
+- Node configs can list `pipeline.credential-origins`
+  (`NodeConfig.CredentialOrigins`, `SeparatedConfig.CredentialOrigins`,
+  rendered on both binaries), and the supplychain scenario lists every
+  organization's node there. From provin.oss 0.4.0 a node shows its
+  `vc-store-bearer` only to its configured destinations and to these
+  origins; the retailer fetches the manufacturer's credential, two hops up,
+  from a VC store that is neither, and without the token that fetch is
+  refused and the chain walk never completes. The pinned oss line ignores
+  the key, so the scenario passes against both.
 - The module graph follows provin.oss's dependency refresh
   (provin-line/oss#83): `o3co/protobuf.interceptors` v0.3.0,
   `connectrpc.com/connect` 1.21.0, `nats.go` 1.53.1, `o3co/go.hocon` 1.13.0,

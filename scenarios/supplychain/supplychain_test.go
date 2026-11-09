@@ -30,17 +30,18 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/provin-line/oss/agentaccess"
 	"github.com/provin-line/oss/appraisal"
 	"github.com/provin-line/oss/crypto/ed25519"
 	auditpb "github.com/provin-line/oss/gen/go/dplaax/audit/v1"
 	"github.com/provin-line/oss/gen/go/dplaax/audit/v1/auditpbconnect"
+	pipelinepb "github.com/provin-line/oss/gen/go/dplaax/pipeline/v1"
 	vcpb "github.com/provin-line/oss/gen/go/dplaax/vc/v1"
 	"github.com/provin-line/oss/gen/go/dplaax/vc/v1/vcpbconnect"
 	"github.com/provin-line/oss/network/pkg/core"
 	"github.com/provin-line/oss/network/pkg/didresolver"
-	"github.com/provin-line/oss/pipeline/transport/envelopecodec"
 	natstransport "github.com/provin-line/oss/pipeline/transport/nats"
 	"github.com/provin-line/oss/vc"
 
@@ -89,6 +90,19 @@ func mfgLoops() string {
         process-id           = "reporter"
         transformation-claim = "generate"
       }`, ingressSubject, lotPipelineDID, lotProcessDID, lotProcessDID+"#signing")
+}
+
+// peerOrigins lists every organization's node base URL as a credential
+// origin. Each node fetches predecessors across the whole chain — the
+// retailer resolves the manufacturer's credential, two hops up — from VC
+// stores behind the other organizations' L1 gates, and a node shows its
+// vc-store-bearer only to its configured destinations and to these.
+func peerOrigins(registryURLs map[string]string) []string {
+	origins := make([]string, 0, len(registryURLs))
+	for _, base := range registryURLs {
+		origins = append(origins, base)
+	}
+	return origins
 }
 
 func distLoops(mfgBase string) string {
@@ -316,12 +330,20 @@ func TestSupplyChain_ThreeOrgsOwnRegistries(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("manufacturer signed envelope was not observable for tamper probe")
 	}
-	envelope, err := envelopecodec.New().UnmarshalEnvelope(captured)
-	if err != nil {
+	// The tamper is to the wire form itself (the dplaax.pipeline.v1 Envelope
+	// message), as an adversary on the transport would make it: the signed
+	// credential bytes are kept, the payload bytes are swapped.
+	var envelope pipelinepb.Envelope
+	if err := proto.Unmarshal(captured, &envelope); err != nil {
 		t.Fatalf("decode captured envelope: %v", err)
 	}
+	// The probe is vacuous unless what it replays is a signed envelope: a
+	// message without a credential is refused before any payload check.
+	if len(envelope.Credential) == 0 || envelope.SequenceNo == 0 {
+		t.Fatalf("captured message is not a signed envelope: credential %d bytes, sequence %d", len(envelope.Credential), envelope.SequenceNo)
+	}
 	envelope.Payload = []byte(`{"lot":"LOT-2026-07-042","co2e_kg":0,"site":"attacker-substitution"}`)
-	tamperedWire, err := envelopecodec.New().MarshalEnvelope(envelope)
+	tamperedWire, err := proto.Marshal(&envelope)
 	if err != nil {
 		t.Fatalf("encode tampered envelope: %v", err)
 	}
@@ -511,6 +533,7 @@ func setupProcess(t *testing.T) scEnv {
 			ResolverDir:        broker.ResolverDir,
 			NodeDID:            nodeDID,
 			RegistryBaseURLs:   regURLs,
+			CredentialOrigins:  peerOrigins(regURLs),
 			AllowLoopback:      true,
 			LoopsBlock:         loops,
 			Tunables:           tunables,
@@ -633,6 +656,7 @@ func setupCompose(t *testing.T) scEnv {
 			ResolverDir:          "/app/jwts",
 			NodeDID:              nodeDID,
 			RegistryBaseURLs:     regURLsInNet,
+			CredentialOrigins:    peerOrigins(regURLsInNet),
 			AllowPrivateNetworks: true,
 			LoopsBlock:           loops,
 			Tunables:             extra,

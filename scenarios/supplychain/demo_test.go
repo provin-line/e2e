@@ -32,10 +32,13 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/provin-line/oss/agentaccess"
 	"github.com/provin-line/oss/appraisal"
-	"github.com/provin-line/oss/pipeline/transport/envelopecodec"
+	pipelinepb "github.com/provin-line/oss/gen/go/dplaax/pipeline/v1"
 	natstransport "github.com/provin-line/oss/pipeline/transport/nats"
+	"github.com/provin-line/oss/vc"
 
 	"github.com/provin-line/e2e/internal/harness"
 )
@@ -72,15 +75,21 @@ func TestDemo(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("manufacturer signed envelope was not observable for the tamper probe")
 	}
-	envelope, err := envelopecodec.New().UnmarshalEnvelope(captured)
-	if err != nil {
+	// The wire form is the dplaax.pipeline.v1 Envelope message; the tamper
+	// below swaps its payload bytes and keeps the signed credential bytes.
+	var envelope pipelinepb.Envelope
+	if err := proto.Unmarshal(captured, &envelope); err != nil {
 		t.Fatalf("decode manufacturer envelope: %v", err)
 	}
-	mfgCredHash, err := envelope.Credential.Hash()
+	mfgCred := new(vc.PipelinePassCredential)
+	if err := mfgCred.UnmarshalJSON(envelope.Credential); err != nil {
+		t.Fatalf("decode manufacturer credential: %v", err)
+	}
+	mfgCredHash, err := mfgCred.Hash()
 	if err != nil {
 		t.Fatalf("hash manufacturer credential: %v", err)
 	}
-	fmt.Printf("[2/6] manufacturer ingests lot %s: signed FirstDrop credential issued (%s)\n", lot, envelope.Credential.Issuer())
+	fmt.Printf("[2/6] manufacturer ingests lot %s: signed FirstDrop credential issued (%s)\n", lot, mfgCred.Issuer())
 	fmt.Printf("      credential hash %s\n", mfgCredHash)
 
 	var head string
@@ -116,7 +125,7 @@ func TestDemo(t *testing.T) {
 
 	fmt.Println("[4/6] adversary republishes the manufacturer envelope with a FORGED payload (lot swapped)")
 	envelope.Payload = []byte(fmt.Sprintf(`{"lot":%q,"co2e_kg":0,"site":"attacker-substitution"}`, lot))
-	tamperedWire, err := envelopecodec.New().MarshalEnvelope(envelope)
+	tamperedWire, err := proto.Marshal(&envelope)
 	if err != nil {
 		t.Fatalf("encode tampered envelope: %v", err)
 	}

@@ -68,6 +68,50 @@ func TestRenderLeavesALoopbackPDPAlone(t *testing.T) {
 	}
 }
 
+const credentialOriginsKey = "provin.network.pipeline.credential-origins"
+
+// A node shows its vc-store-bearer only to the destinations it is configured
+// with and to credential-origins (provin.oss 0.4.0). A multi-organization
+// scenario whose node fetches a predecessor from a peer that is not one of
+// its destinations lists that peer here, or the fetch goes without the token
+// and the peer's L1 gate refuses it.
+func TestRenderListsCredentialOrigins(t *testing.T) {
+	rendered := NodeConfig{CredentialOrigins: []string{"http://127.0.0.1:18443", "http://127.0.0.1:18445"}}.Render()
+	got, err := loadRendered(t, rendered).StringList(credentialOriginsKey)
+	if err != nil {
+		t.Fatalf("%s: %v\n%s", credentialOriginsKey, err, rendered)
+	}
+	if want := []string{"http://127.0.0.1:18443", "http://127.0.0.1:18445"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s = %q, want %q", credentialOriginsKey, got, want)
+	}
+}
+
+func TestRenderOmitsCredentialOriginsWhenNoneAreGiven(t *testing.T) {
+	if out := (NodeConfig{}).Render(); strings.Contains(out, "credential-origins") {
+		t.Fatalf("rendered a credential-origins entry with none given:\n%s", out)
+	}
+}
+
+func TestSplitNodeConfig_CredentialOriginsReachBothBinaries(t *testing.T) {
+	networkCfg, pipelineCfg := SplitNodeConfig(SeparatedConfig{
+		NetworkListenAddr:  ":8443",
+		PipelineListenAddr: ":8444",
+		RegistryID:         "reg.example",
+		ResolverBaseURL:    "http://127.0.0.1:8443",
+		PDPBaseURL:         "http://127.0.0.1:9091",
+		CredentialOrigins:  []string{"http://peer-network:8443"},
+	})
+	for name, cfg := range map[string]string{"network": networkCfg, "pipeline": pipelineCfg} {
+		got, err := loadRendered(t, cfg).StringList(credentialOriginsKey)
+		if err != nil {
+			t.Fatalf("%s: %s: %v\n%s", name, credentialOriginsKey, err, cfg)
+		}
+		if want := []string{"http://peer-network:8443"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: %s = %q, want %q", name, credentialOriginsKey, got, want)
+		}
+	}
+}
+
 func TestRenderLeavesAnHTTPSOrMalformedPDPAlone(t *testing.T) {
 	for _, pdp := range []string{"https://pdp:443", "::not a url", ""} {
 		if out := (NodeConfig{PDPBaseURL: pdp}).Render(); strings.Contains(out, "plain-internal") {
