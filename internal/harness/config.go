@@ -28,6 +28,13 @@ type NodeConfig struct {
 	RegistryBaseURLs map[string]string
 	VCStoreEndpoint  string // optional; producing loops publish credentials here
 	LoopsBlock       string // contents of pipeline.loops { ... }, may be empty
+	// CredentialOrigins are the peers' base URLs the node may show its
+	// vc-store-bearer to besides its configured destinations (vc-store-endpoint
+	// and each loop's upstream endpoint): in a multi-organization topology, the
+	// other organizations' nodes, whose VC stores the batch resolver fetches
+	// predecessors from behind their L1 gate. Rendered as
+	// pipeline.credential-origins when non-empty.
+	CredentialOrigins []string
 
 	// SSRF-guard opt-ins. Process runtime nodes talk to loopback peers
 	// (AllowLoopback); compose runtime nodes talk over the container network's
@@ -135,6 +142,15 @@ func (c NodeConfig) Render() string {
 	// Always present: the batch resolver reuses this token for peer predecessor
 	// fetches, which a consuming-only node (no endpoint) still performs.
 	fmt.Fprintf(&b, "    vc-store-bearer   = %q\n", BearerToken)
+	if len(c.CredentialOrigins) > 0 {
+		origins := append([]string(nil), c.CredentialOrigins...)
+		sort.Strings(origins)
+		quoted := make([]string, len(origins))
+		for i, o := range origins {
+			quoted[i] = fmt.Sprintf("%q", o)
+		}
+		fmt.Fprintf(&b, "    credential-origins = [%s]\n", strings.Join(quoted, ", "))
+	}
 	if c.LoopsBlock != "" {
 		fmt.Fprintf(&b, "    loops {\n%s\n    }\n", c.LoopsBlock)
 	}

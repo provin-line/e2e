@@ -92,6 +92,19 @@ func mfgLoops() string {
       }`, ingressSubject, lotPipelineDID, lotProcessDID, lotProcessDID+"#signing")
 }
 
+// peerOrigins lists every organization's node base URL as a credential
+// origin. Each node fetches predecessors across the whole chain — the
+// retailer resolves the manufacturer's credential, two hops up — from VC
+// stores behind the other organizations' L1 gates, and a node shows its
+// vc-store-bearer only to its configured destinations and to these.
+func peerOrigins(registryURLs map[string]string) []string {
+	origins := make([]string, 0, len(registryURLs))
+	for _, base := range registryURLs {
+		origins = append(origins, base)
+	}
+	return origins
+}
+
 func distLoops(mfgBase string) string {
 	return fmt.Sprintf(`
       relay {
@@ -324,6 +337,11 @@ func TestSupplyChain_ThreeOrgsOwnRegistries(t *testing.T) {
 	if err := proto.Unmarshal(captured, &envelope); err != nil {
 		t.Fatalf("decode captured envelope: %v", err)
 	}
+	// The probe is vacuous unless what it replays is a signed envelope: a
+	// message without a credential is refused before any payload check.
+	if len(envelope.Credential) == 0 || envelope.SequenceNo == 0 {
+		t.Fatalf("captured message is not a signed envelope: credential %d bytes, sequence %d", len(envelope.Credential), envelope.SequenceNo)
+	}
 	envelope.Payload = []byte(`{"lot":"LOT-2026-07-042","co2e_kg":0,"site":"attacker-substitution"}`)
 	tamperedWire, err := proto.Marshal(&envelope)
 	if err != nil {
@@ -515,6 +533,7 @@ func setupProcess(t *testing.T) scEnv {
 			ResolverDir:        broker.ResolverDir,
 			NodeDID:            nodeDID,
 			RegistryBaseURLs:   regURLs,
+			CredentialOrigins:  peerOrigins(regURLs),
 			AllowLoopback:      true,
 			LoopsBlock:         loops,
 			Tunables:           tunables,
@@ -637,6 +656,7 @@ func setupCompose(t *testing.T) scEnv {
 			ResolverDir:          "/app/jwts",
 			NodeDID:              nodeDID,
 			RegistryBaseURLs:     regURLsInNet,
+			CredentialOrigins:    peerOrigins(regURLsInNet),
 			AllowPrivateNetworks: true,
 			LoopsBlock:           loops,
 			Tunables:             extra,
