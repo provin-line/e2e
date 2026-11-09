@@ -30,17 +30,18 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/provin-line/oss/agentaccess"
 	"github.com/provin-line/oss/appraisal"
 	"github.com/provin-line/oss/crypto/ed25519"
 	auditpb "github.com/provin-line/oss/gen/go/dplaax/audit/v1"
 	"github.com/provin-line/oss/gen/go/dplaax/audit/v1/auditpbconnect"
+	pipelinepb "github.com/provin-line/oss/gen/go/dplaax/pipeline/v1"
 	vcpb "github.com/provin-line/oss/gen/go/dplaax/vc/v1"
 	"github.com/provin-line/oss/gen/go/dplaax/vc/v1/vcpbconnect"
 	"github.com/provin-line/oss/network/pkg/core"
 	"github.com/provin-line/oss/network/pkg/didresolver"
-	"github.com/provin-line/oss/pipeline/transport/envelopecodec"
 	natstransport "github.com/provin-line/oss/pipeline/transport/nats"
 	"github.com/provin-line/oss/vc"
 
@@ -316,12 +317,15 @@ func TestSupplyChain_ThreeOrgsOwnRegistries(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("manufacturer signed envelope was not observable for tamper probe")
 	}
-	envelope, err := envelopecodec.New().UnmarshalEnvelope(captured)
-	if err != nil {
+	// The tamper is to the wire form itself (the dplaax.pipeline.v1 Envelope
+	// message), as an adversary on the transport would make it: the signed
+	// credential bytes are kept, the payload bytes are swapped.
+	var envelope pipelinepb.Envelope
+	if err := proto.Unmarshal(captured, &envelope); err != nil {
 		t.Fatalf("decode captured envelope: %v", err)
 	}
 	envelope.Payload = []byte(`{"lot":"LOT-2026-07-042","co2e_kg":0,"site":"attacker-substitution"}`)
-	tamperedWire, err := envelopecodec.New().MarshalEnvelope(envelope)
+	tamperedWire, err := proto.Marshal(&envelope)
 	if err != nil {
 		t.Fatalf("encode tampered envelope: %v", err)
 	}

@@ -15,6 +15,13 @@ something to point at. See [SECURITY.md](SECURITY.md#supported-versions).
 
 ### Changed
 
+- The supplychain scenario's payload-substitution probe (and the demo's)
+  tampers the captured envelope as the `dplaax.pipeline.v1` `Envelope`
+  message, through `google.golang.org/protobuf` (now a direct requirement),
+  instead of decoding and re-encoding it through oss's `envelopecodec`. The
+  probe is an adversary on the transport, so the wire message is what it
+  touches; and it no longer depends on the codec's constructor, which
+  provin.oss 0.4.0 changes to take bounds.
 - The module graph follows provin.oss's dependency refresh
   (provin-line/oss#83): `o3co/protobuf.interceptors` v0.3.0,
   `connectrpc.com/connect` 1.21.0, `nats.go` 1.53.1, `o3co/go.hocon` 1.13.0,
