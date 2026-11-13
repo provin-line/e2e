@@ -9,7 +9,7 @@ require (
 	github.com/nats-io/jwt/v2 v2.8.2
 	github.com/nats-io/nats-server/v2 v2.15.1
 	github.com/nats-io/nkeys v0.4.16
-	github.com/o3co/protobuf.interceptors v0.6.0
+	github.com/o3co/protobuf.interceptors v0.7.0
 	github.com/provin-line/oss v0.0.0-00010101000000-000000000000
 	google.golang.org/protobuf v1.36.12
 )
